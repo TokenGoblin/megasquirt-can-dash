@@ -107,6 +107,12 @@ _INLINE_Y = config.BAR_Y - config.BAR_SEGMENT_H // 2
 _MARKER_PEAK = 0   # orange line at the power-on peak, drawn into the bitmap
 _MARKER_AVG = 1    # orange line at the running average, its own TileGrid
 
+# Cache-invalidation sentinel. Must NOT be None: peak/low/average legitimately
+# ARE None before the first CAN frame, and a None-valued cache reset would
+# compare equal to that - suppressing the very first "PEAK ---" paint (a bug
+# caught on the bench: the peak line never appeared with no CAN attached).
+_UNSET = object()
+
 
 def _make_label(font_scale, color, anchor, position, text=""):
     """One-line bitmap_label factory (all text uses the same builtin font)."""
@@ -708,8 +714,8 @@ class DashUI:
         self._c_value_key = None    # (stale?) raw int key for the big number
         self._c_value_text = None
         self._c_value_color = None
-        self._c_peak_a = None       # peak/lo/avg cache ints (meaning is per-page)
-        self._c_peak_b = None
+        self._c_peak_a = _UNSET     # peak/lo/avg caches (may hold None = "no
+        self._c_peak_b = _UNSET     # data yet", hence the _UNSET sentinel)
         self._c_banner = None       # bool: banner currently shown
         self._c_log_state = None    # datalog indicator cache
 
@@ -783,11 +789,13 @@ class DashUI:
             pal[0] = config.COLOR_DOT_ACTIVE if i == page else config.COLOR_DOT_INACTIVE
 
         # Invalidate the shared-label caches so the new page paints fully.
+        # Peak caches use _UNSET, not None - peaks are None until the first
+        # CAN frame, and None-as-sentinel would swallow the "PEAK ---" paint.
         self._c_value_key = None
         self._c_value_text = None
         self._c_value_color = None
-        self._c_peak_a = None
-        self._c_peak_b = None
+        self._c_peak_a = _UNSET
+        self._c_peak_b = _UNSET
         self._c_banner = None
         if is_special:
             # Special pages show staleness per-cell; the corner banner is
