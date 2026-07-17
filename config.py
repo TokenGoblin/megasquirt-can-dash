@@ -76,8 +76,11 @@ STALE_TIMEOUT_MS = 1000
 
 # Local atmospheric pressure in kPa (float). Boost PSI is computed as
 # (MAP - this) / KPA_PER_PSI, so tweak for your altitude if boost doesn't
-# read ~0.0 with the engine off. Sea level standard: 101.3.
-ATMOSPHERIC_KPA = 101.3
+# read ~0.0 with the engine off. Sea level standard: 101.3. The easiest
+# calibration is simply your dash's engine-off MAP reading - by definition
+# that IS local baro. (84.1 here was measured live off this install's ECU,
+# key-on engine-off, 2026-07-17.)
+ATMOSPHERIC_KPA = 84.1
 
 # Unit conversion constant (kPa per PSI). Physics - never needs changing.
 KPA_PER_PSI = 6.894757
