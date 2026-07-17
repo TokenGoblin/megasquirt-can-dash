@@ -55,6 +55,12 @@ one shared `ticks.ms()` stamp per pass) whether its own deadline has arrived:
   bus-off by itself, and `CanBus.bus_ok` (checked each render tick) raises the
   `NO CAN` banner immediately on a failed bus state instead of waiting out the
   1 s stale timeout.
+- **Self-calibrating baro reference**: boost's zero point is captured from
+  engine-off MAP (which *is* local baro, read by the same sensor - so sensor
+  offset error cancels in the subtraction). Gated on RPM == 0 from the same
+  frame plus a 55-110 kPa plausibility window, low-pass-tracked while parked,
+  frozen while running. Integer-only and allocation-free; validated live
+  (locked 84.2 kPa at ~5,000 ft, boost exactly 0.0 engine-off).
 
 ## Fixed-point (x10 integer) data model
 
@@ -128,8 +134,8 @@ too). Why this matters on CircuitPython:
 
 | Thing | Measured / configured |
 |---|---|
-| Main loop | **~830 loops/s** (no CAN attached; drops somewhat under frame load) |
-| Worst loop pass | **5 ms** typical peak (a render tick); **~11 ms** rare peak (a GC pass) |
+| Main loop | **~830 loops/s** bench (no CAN); **~640-820 loops/s** on a live bus (~53 frames/s) |
+| Worst loop pass | **5-10 ms** typical peak (a render tick); **~125-177 ms** occasional GC spike on a live bus with DEBUG on (the ~53 canio message allocations/s churn the heap; a spike costs 2-3 of the 20 Hz frames a few times a minute - imperceptible, and lower with DEBUG's own print allocations off) |
 | Display refresh | fixed 20 Hz (`UI_TICK_MS = 50`) |
 | Touch poll | 50 Hz (`TOUCH_POLL_MS = 20`) |
 | CAN decode capacity | ≥ 13,000 frames/s ceiling (16/pass × 830 passes/s) vs ~40-200/s actually broadcast |

@@ -77,11 +77,32 @@ def gradient_color(value, stops):
     return stops[-1][1]
 
 
+# MAP's blue/green (vacuum/boost) boundary follows the LIVE barometric
+# reference from canbus, so its stops live in a mutable list rebuilt by
+# set_map_baro() - unlike every other channel's static config tuple.
+# Initialized to the fallback so colors are sane before the first capture.
+_MAP_STOPS_LIVE = [
+    (config.BARO_FALLBACK_KPA - config.MAP_BLEND_BAND_KPA, config.COLOR_ALERT_BLUE),
+    (config.BARO_FALLBACK_KPA + config.MAP_BLEND_BAND_KPA, config.COLOR_ALERT_GREEN),
+]
+
+
+def set_map_baro(baro_kpa):
+    """Re-center MAP's vacuum/boost color boundary on `baro_kpa` (float).
+
+    Called by DashUI.update() only when the baro reference actually moved
+    (rare: once at lock, then occasional 0.1 kPa steps while parked), so the
+    two tuple allocations here never happen in steady state.
+    """
+    _MAP_STOPS_LIVE[0] = (baro_kpa - config.MAP_BLEND_BAND_KPA, config.COLOR_ALERT_BLUE)
+    _MAP_STOPS_LIVE[1] = (baro_kpa + config.MAP_BLEND_BAND_KPA, config.COLOR_ALERT_GREEN)
+
+
 # Per-parameter stop tables, indexed by config.PARAM_* order
 # (RPM, MAP, BOOST, CLT, TPS, AFR, BATT, MAT).
 _STOPS_BY_PARAM = (
     config.RPM_STOPS,
-    config.MAP_STOPS,
+    _MAP_STOPS_LIVE,
     config.BOOST_STOPS,
     config.CLT_STOPS,
     config.TPS_STOPS,
@@ -718,6 +739,7 @@ class DashUI:
         self._c_peak_b = _UNSET     # data yet", hence the _UNSET sentinel)
         self._c_banner = None       # bool: banner currently shown
         self._c_log_state = None    # datalog indicator cache
+        self._c_baro = None         # last baro_x10 applied to the MAP stops
 
     # ---- boot splash --------------------------------------------------------
 
@@ -805,7 +827,7 @@ class DashUI:
 
     # ---- render tick ---------------------------------------------------------------
 
-    def update(self, ecu, now, bus_ok, log_state):
+    def update(self, ecu, now, bus_ok, log_state, baro_x10):
         """Render pass, self-gated to the UI tick (~20 Hz), ending in a
         manual display.refresh().
 
@@ -815,12 +837,20 @@ class DashUI:
             bus_ok    - CanBus.bus_ok; False raises the NO CAN banner
                         immediately (on top of per-channel stale timeouts).
             log_state - datalog.STATE_* for the corner indicator.
+            baro_x10  - CanBus.baro_ref_x10; recenters MAP's vacuum/boost
+                        color boundary when it moves.
         Between ticks this returns after one integer compare - the loop
         spends its time in CAN drain, not drawing.
         """
         if self._last_tick is not None and ticks.diff(now, self._last_tick) < config.UI_TICK_MS:
             return
         self._last_tick = now
+
+        # Follow the live baro reference (moves once at lock, then only in
+        # 0.1 kPa steps while parked - int compare gates the float work).
+        if baro_x10 != self._c_baro:
+            self._c_baro = baro_x10
+            set_map_baro(baro_x10 / 10.0)
 
         if self._page_dirty:
             self._apply_page_chrome()

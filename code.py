@@ -75,7 +75,8 @@ while True:
     if delta:
         dash.change_page(delta)
 
-    dash.update(ecu, now, can.bus_ok, logger.state)   # ~20 Hz render tick
+    dash.update(ecu, now, can.bus_ok, logger.state,   # ~20 Hz render tick
+                can.baro_ref_x10)
 
     logger.update(ecu, now)   # engine-gated 10 Hz CSV rows
 
@@ -90,6 +91,8 @@ while True:
                 "loops/s:", _dbg_loops * 1000 // config.DEBUG_INTERVAL_MS,
                 "worst_loop_ms:", _dbg_worst_ms,
                 "mem_free:", gc.mem_free(),
+                "baro_x10:", can.baro_ref_x10,
+                "boost_x10:", ecu.value_x10[config.PARAM_BOOST],
             )
             _dbg_window_start = now
             _dbg_loops = 0

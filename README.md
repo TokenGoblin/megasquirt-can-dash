@@ -32,6 +32,9 @@ real-world testing.
 - **AFR center-zero bar** - fill grows outward from 14.7 stoich (left = rich,
   right = lean) with richest/leanest hold markers and a `LO/HI` readout
 - **Battery running-average** marker and `AVG` readout (more useful than a peak)
+- **Self-calibrating boost zero** - baro reference captured from engine-off MAP
+  (RPM-gated + plausibility-checked), so Boost reads 0.0 engine-off at any
+  altitude, in any weather, out of the box
 - **Overview page** - Boost / Coolant / AFR / Battery in one 2x2 glance
 - **Beam-gauge page** - Boost + MAT as two big VU-meter-style bars
 - **Peak-hold everywhere** - highest value since power-on, per channel
@@ -140,7 +143,13 @@ Everything tunable lives in **`config.py`**, each entry commented with units,
 valid range, and where to find the right value for your setup. Highlights:
 
 - `BASE_CAN_ID` - must match TunerStudio's CAN ID (Base)
-- `ATMOSPHERIC_KPA` - trim so Boost reads ~0.0 engine-off at your altitude
+- `ATMOSPHERIC_KPA_OVERRIDE` - Boost's barometric reference. Default `None` =
+  **self-calibrating**: engine-off MAP *is* local baro, so the dash locks the
+  reference from the first RPM==0 frames, keeps tracking it whenever the
+  engine is off (a mountain fuel stop recalibrates it), and freezes it while
+  running - correct at any altitude with zero setup. Set a number (kPa) to
+  pin it instead; your correct pinned value is simply the engine-off MAP
+  reading
 - `RPM_RED_AT`, `SHIFT_BAR_MAX_RPM` - match your redline
 - `*_STOPS` threshold tables - every gauge's color bands
 - `TS_RAW_X_MIN` / `TS_RAW_X_MAX` - touch calibration (swap them if left/right
@@ -179,6 +188,7 @@ $dest.Save("splash.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
 | Touch does nothing | V1 FeatherWing (STMPE610) - this code needs the V2's TSC2007; check the serial console for the probe message |
 | `NO SD` with a card inserted | Card not FAT32; card not fully clicked in; some very large (>32 GB) cards ship exFAT - reformat FAT32 |
 | `ValueError: incompatible .mpy file` on boot | Library bundle doesn't match your CircuitPython major version - use the 10.x bundle with CircuitPython 10 |
+| Boost slightly off after the dash rebooted while driving | The baro reference couldn't self-capture (it needs to see RPM = 0) so it's running on the sea-level fallback; it locks correctly the next time the engine is off. Pin `ATMOSPHERIC_KPA_OVERRIDE` if your install power-cycles the dash mid-drive routinely |
 | Values freeze but no `NO CAN` | Shouldn't happen (stale timeout is per-channel) - check the serial console for tracebacks and please open an issue |
 
 ## Repo structure

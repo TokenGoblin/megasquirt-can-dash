@@ -74,13 +74,39 @@ STALE_TIMEOUT_MS = 1000
 
 # ==== DERIVED CHANNELS ======================================================
 
-# Local atmospheric pressure in kPa (float). Boost PSI is computed as
-# (MAP - this) / KPA_PER_PSI, so tweak for your altitude if boost doesn't
-# read ~0.0 with the engine off. Sea level standard: 101.3. The easiest
-# calibration is simply your dash's engine-off MAP reading - by definition
-# that IS local baro. (84.1 here was measured live off this install's ECU,
-# key-on engine-off, 2026-07-17.)
-ATMOSPHERIC_KPA = 84.1
+# Barometric reference for the Boost calculation: boost PSI =
+# (MAP - baro) / KPA_PER_PSI.
+#
+# By default (OVERRIDE = None) the dash measures baro ITSELF: with the
+# engine off, MAP *is* local barometric pressure, read by the very sensor
+# boost is derived from (so sensor offset error cancels in the subtraction).
+# The reference locks from the first CAN frames where RPM == 0, keeps
+# slowly tracking whenever the engine is off (so a mountain-pass fuel stop
+# recalibrates it), and freezes while the engine runs. Works out of the box
+# at any altitude, in any weather - the same "initial MAP reading" strategy
+# MegaSquirt itself uses for baro correction.
+#
+# Set a number (kPa, e.g. 101.3) to pin the reference instead - for bench
+# determinism or unusual setups. Your correct pinned value is simply the
+# MAP your dash shows with the engine off.
+ATMOSPHERIC_KPA_OVERRIDE = None
+
+# Used as the reference only until the first valid engine-off capture (or
+# forever, if the dash never sees RPM == 0 - e.g. powered up mid-drive).
+# Sea-level standard atmosphere.
+BARO_FALLBACK_KPA = 101.3
+
+# Plausibility window for baro capture, kPa. Rejects garbage frames and -
+# together with the RPM gate - can never mistake idle vacuum for
+# atmosphere. 55-110 covers roughly -1,000 ft to 15,000 ft elevation.
+BARO_MIN_KPA = 55.0
+BARO_MAX_KPA = 110.0
+
+# Engine-off tracking low-pass strength: each qualifying frame moves the
+# reference by (MAP - ref) / 2**BARO_FILTER_SHIFT. 3 = 1/8 per frame, i.e.
+# settles a step change in a couple of seconds at the ~18 Hz frame rate
+# while shrugging off single-frame noise.
+BARO_FILTER_SHIFT = 3
 
 # Unit conversion constant (kPa per PSI). Physics - never needs changing.
 KPA_PER_PSI = 6.894757
@@ -135,7 +161,10 @@ BATT_RUN_MAX_V = 14.7
 BATT_HIGH_V = 15.0
 
 # MAP (kPa): blue under vacuum, green under boost, blending across a band
-# straddling atmospheric so it doesn't flicker at the boundary.
+# straddling atmospheric so it doesn't flicker at the boundary. The
+# boundary follows the live baro reference (see barometric section above),
+# so MAP's color stops are built at runtime in ui.py, not in the static
+# tables below.
 MAP_BLEND_BAND_KPA = 5.0
 
 # RPM: continuous motorsport-style gradient - blue only at idle, then a
@@ -188,10 +217,8 @@ BATT_STOPS = (
     (BATT_RUN_MAX_V, COLOR_ALERT_GREEN),
     (BATT_HIGH_V, COLOR_ALERT_RED),
 )
-MAP_STOPS = (
-    (ATMOSPHERIC_KPA - MAP_BLEND_BAND_KPA, COLOR_ALERT_BLUE),
-    (ATMOSPHERIC_KPA + MAP_BLEND_BAND_KPA, COLOR_ALERT_GREEN),
-)
+# (MAP has no static stop table - ui.py rebuilds its blue/green stops
+# around the live baro reference whenever that reference moves.)
 # TPS has no danger zone - the gradient is purely visual feedback.
 TPS_STOPS = (
     (0, COLOR_ALERT_BLUE),

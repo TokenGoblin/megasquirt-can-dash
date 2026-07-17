@@ -45,12 +45,22 @@ _ID_DASH1 = config.BASE_CAN_ID + 1
 _ID_DASH2 = config.BASE_CAN_ID + 2
 _ID_DASH3 = config.BASE_CAN_ID + 3
 
-# Boost conversion, precomputed: (MAP_x10 - ATM_x10) is kPa*10 above
-# atmospheric; multiplying kPa by 1/6.894757 gives PSI, so the same factor
-# maps kPa*10 -> PSI*10 directly. One float multiply per DASH0 frame
+# Boost conversion: (MAP_x10 - baro_x10) is kPa*10 above atmospheric;
+# multiplying kPa by 1/6.894757 gives PSI, so the same factor maps
+# kPa*10 -> PSI*10 directly. One float multiply per DASH0 frame
 # (~10-30 Hz) - everything else in the decode path is integer math.
-_ATM_KPA_X10 = int(config.ATMOSPHERIC_KPA * 10 + 0.5)
 _PSI_PER_KPA = 1.0 / config.KPA_PER_PSI
+
+# Barometric reference plumbing (see config.py's barometric section for the
+# full design rationale). All x10 fixed-point ints.
+_BARO_OVERRIDE_X10 = (
+    None if config.ATMOSPHERIC_KPA_OVERRIDE is None
+    else int(config.ATMOSPHERIC_KPA_OVERRIDE * 10 + 0.5)
+)
+_BARO_FALLBACK_X10 = int(config.BARO_FALLBACK_KPA * 10 + 0.5)
+_BARO_MIN_X10 = int(config.BARO_MIN_KPA * 10 + 0.5)
+_BARO_MAX_X10 = int(config.BARO_MAX_KPA * 10 + 0.5)
+_BARO_SHIFT = config.BARO_FILTER_SHIFT
 
 
 # ==== FIXED-POINT FORMATTING ================================================
@@ -183,6 +193,20 @@ class CanBus:
         # empty) - the non-blocking contract the main loop depends on.
         self._listener = self._can.listen(matches=matches, timeout=0)
 
+        # Barometric reference, x10 kPa. With an override configured this is
+        # pinned for the whole run; otherwise it starts unlocked (None) and
+        # is captured/tracked from engine-off MAP frames in _decode().
+        self._baro_x10 = _BARO_OVERRIDE_X10
+
+    @property
+    def baro_ref_x10(self):
+        """Current barometric reference (kPa * 10 int) used for the Boost
+        derivation and the MAP page's vacuum/boost color boundary: the
+        configured override, else the captured engine-off value, else the
+        sea-level fallback until the first valid capture."""
+        b = self._baro_x10
+        return _BARO_FALLBACK_X10 if b is None else b
+
     @property
     def bus_ok(self):
         """True while the controller is in a working error state
@@ -235,10 +259,34 @@ class CanBus:
             ecu.set(config.PARAM_RPM, rpm * 10, now)
             ecu.set(config.PARAM_CLT, clt_x10, now)
             ecu.set(config.PARAM_TPS, tps_x10, now)
-            # Boost is derived from MAP (gauge pressure above atmospheric,
-            # in PSI) and stamped with the same tick so it goes stale exactly
-            # when MAP does. Round-half-away-from-zero to the nearest 0.1 PSI.
-            b = (map_x10 - _ATM_KPA_X10) * _PSI_PER_KPA
+
+            # Baro capture: engine-off MAP *is* local barometric pressure.
+            # Gated on RPM == 0 (same frame - can never mistake idle vacuum
+            # for atmosphere) plus a plausibility window (rejects garbage
+            # frames from a booting ECU). First qualifying frame locks the
+            # reference exactly; later engine-off frames low-pass toward MAP
+            # so a stop at a different altitude quietly recalibrates. Frozen
+            # whenever the engine runs. Integer-only, allocation-free.
+            if _BARO_OVERRIDE_X10 is None and rpm == 0 and (
+                _BARO_MIN_X10 <= map_x10 <= _BARO_MAX_X10
+            ):
+                b = self._baro_x10
+                if b is None:
+                    self._baro_x10 = map_x10
+                elif b != map_x10:
+                    step = (map_x10 - b) >> _BARO_SHIFT
+                    if step == 0 and map_x10 > b:
+                        step = 1  # floor-shift stalls on small +deltas; nudge
+                    self._baro_x10 = b + step
+
+            # Boost is derived from MAP (gauge pressure above the baro
+            # reference, in PSI) and stamped with the same tick so it goes
+            # stale exactly when MAP does. Round-half-away-from-zero to the
+            # nearest 0.1 PSI.
+            ref = self._baro_x10
+            if ref is None:
+                ref = _BARO_FALLBACK_X10
+            b = (map_x10 - ref) * _PSI_PER_KPA
             ecu.set(config.PARAM_BOOST,
                     int(b + 0.5) if b >= 0 else int(b - 0.5), now)
 
