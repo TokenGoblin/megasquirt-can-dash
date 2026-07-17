@@ -1,0 +1,13 @@
+# Third-party CircuitPython libraries - install from the Adafruit bundle per
+# README.md rather than committing them here.
+lib/
+
+# Personal/local boot logo - see README.md "Custom splash screen" section.
+splash.bmp
+
+# CircuitPython / OS noise
+System Volume Information/
+*.pyc
+__pycache__/
+.DS_Store
+Thumbs.db
