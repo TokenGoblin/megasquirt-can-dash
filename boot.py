@@ -1,14 +1,22 @@
-# Intentionally does nothing.
+# ============================================================================
+#  boot.py - deliberately (almost) empty
+# ============================================================================
+#  Purpose:   Documents WHY this dash needs nothing in boot.py - and warns
+#             against the one thing you might be tempted to add here.
+#  Talks to:  Nothing.
+#  Fits in:   CircuitPython runs boot.py before USB enumeration, then
+#             code.py. All dash startup lives in code.py and its modules.
 #
-# An earlier version of this file called storage.remount("/", readonly=False)
-# so code.py could write log files directly to the internal CIRCUITPY flash.
-# In practice supervisor.runtime.usb_connected read False here even while
-# plugged into a PC (boot.py runs very early, before USB enumeration
-# finishes), so it kept flipping the drive read-only to the host - the
-# repeated "media is write protected" lockouts during development. The
-# datalogger now writes to a physical SD card (mounted from code.py, at
-# "/sd") instead, which needs no special boot.py permission dance at all -
-# so this file is kept empty rather than removed, as a placeholder/reminder
-# not to reintroduce that pattern without a physical jumper-pin check (the
-# actually-reliable way to detect "no PC attached", per CircuitPython's own
-# datalogger guides).
+#  Do NOT add storage.remount("/", readonly=False) here to log onto the
+#  internal CIRCUITPY flash. That pattern (a) makes the drive read-only to
+#  your PC, turning every code tweak into a safe-mode dance, and (b) its
+#  usual escape hatch - keying the remount off supervisor.runtime.usb_connected
+#  - reads unreliably this early in boot (USB hasn't enumerated yet), which
+#  is exactly how this project once locked itself out ("media is write
+#  protected") during development. If you ever truly need it, gate it on a
+#  physical jumper pin instead, per CircuitPython's own datalogger guides.
+#
+#  Datalogging instead writes to the FeatherWing's microSD slot, mounted at
+#  /sd by datalog.py at runtime - no boot-time storage games required, and
+#  the CIRCUITPY drive stays writable from your PC at all times.
+# ============================================================================

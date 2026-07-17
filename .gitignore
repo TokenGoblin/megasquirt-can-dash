@@ -1,13 +1,26 @@
-# Third-party CircuitPython libraries - install from the Adafruit bundle per
-# README.md rather than committing them here.
-lib/
+# Pre-refactor snapshot - kept locally, never published or edited.
+backup/
 
 # Personal/local boot logo - see README.md "Custom splash screen" section.
 splash.bmp
 
-# CircuitPython / OS noise
+# NOTE: /lib is deliberately NOT ignored - but don't commit libraries either.
+# Users copy the required Adafruit bundle libraries into CIRCUITPY/lib per the
+# README's "CircuitPython setup" table (names + tested versions listed there).
+
+# OS cruft
+.DS_Store
+._*
+.Trashes
+Thumbs.db
+desktop.ini
 System Volume Information/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Python
 *.pyc
 __pycache__/
-.DS_Store
-Thumbs.db
