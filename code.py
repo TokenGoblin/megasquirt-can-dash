@@ -18,7 +18,7 @@
 #  so the loop spins at several hundred Hz and every subsystem hits its own
 #  deadline independently. See PERFORMANCE.md for the full design rationale.
 #
-#  Project: https://github.com/<you>/megasquirt-can-dash  (see README.md)
+#  Project: https://github.com/TokenGoblin/megasquirt-can-dash  (see README.md)
 # ============================================================================
 
 import gc
