@@ -203,8 +203,10 @@ datalog.py      SD mount + engine-gated CSV session logger
 ticks.py        rollover-safe millisecond timing helpers
 boot.py         intentionally empty (see its comments for why)
 PERFORMANCE.md  architecture + optimization rationale
-backup/         pre-refactor snapshot of the original single-file version
 ```
+
+(The original pre-refactor single-file version is preserved in git history at
+the `pre-refactor` tag.)
 
 ## License
 
