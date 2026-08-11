@@ -71,6 +71,19 @@ too). Why this matters on CircuitPython:
 - **Exact change detection**: "did this channel change since last paint?" is a
   small-int compare (`==`), free of float noise, and small-int math doesn't
   heap-allocate in CircuitPython.
+- **The plausibility gate is integer too**: `SANE_RANGES` is converted to x10
+  ints once at import, so the trust-boundary check every sample passes through
+  in `EcuData.set()` is two integer compares. Out-of-range samples are dropped
+  rather than clamped - a clamped value is a believable lie, and this is the
+  only place the dash can refuse to believe the bus.
+- **Only the statistics that get read are kept**: peak for every channel, but
+  `low` only for AFR and the running average only for Battery
+  (`config.LOW_PARAMS` / `AVG_PARAMS`). Accumulating an average for all eight
+  was not just wasted work - RPM's accumulator passes MicroPython's 31-bit
+  small-int boundary after roughly 17 minutes of driving at 6,000 rpm, after
+  which every `+=` allocates a big integer on the decode path and quietly
+  undoes the zero-allocation steady state described below. Battery's, the one
+  that remains, stays a small int for over a day of continuous running.
 - **Strings are built only at the edges** (render tick / datalog row), and only
   when the underlying int changed. `format_x10()` splits the fixed-point int
   directly (`"{}.{}".format(v // 10, v % 10)`) - no float round-trip.
@@ -99,6 +112,18 @@ too). Why this matters on CircuitPython:
   the shared-label caches. Zero widget construction after startup - important
   because widget construction is exactly the kind of many-small-object
   allocation that fragments a MicroPython heap.
+- **`auto_refresh = False` is load-bearing for more than tearing.** The SD
+  card shares this SPI bus (`code.py` hands `board.SPI()` to the datalogger).
+  Because refreshes only happen at a point of our choosing, they can never
+  interleave with a card transaction. If you ever re-enable auto-refresh for
+  convenience, that guarantee goes with it.
+- **The alarm scan is per-tick, not per-page**: one pass over
+  `config.ALARM_PRIORITY` (five channels, integer compares, short-circuited
+  entirely when the engine isn't running) per render tick, shared by the
+  banner and the page. This is what makes an overheat on page 4 visible from
+  page 1. Its one cost against the "near-zero SPI when nothing changes" rule
+  is the alarm banner's blink, which dirties one small label twice a second -
+  but only while something is actually wrong.
 - **Bars draw with `bitmaptools.fill_region`** (native C rectangle fill), only
   on change, and write each pixel exactly once per repaint (background sides +
   fill middle) so there's no clear-then-redraw flash. Hold markers that move
@@ -142,10 +167,43 @@ too). Why this matters on CircuitPython:
 | Heap | ~24 KB free after startup; sawtooths ~9-24 KB with DEBUG's own print allocations, GC pauses absorbed inside the 11 ms worst case |
 | Datalog | 10 Hz rows, `flush()` per row (SD flush is the loop's one intentional stall, a few ms, engine-running only - the price of crash-proof logs) |
 
+## Fault containment
+
+The loop catches every exception rather than letting one end the VM (see
+`code.py`). This is a deliberate reversal of the usual "let it crash" instinct,
+for one reason: a dash that stops at 70 mph does not come back without a power
+cycle, and the subsystems most likely to fail - a vibrating SD card, a
+glitching I2C touch chip - are the ones you would least mind losing.
+
+- Faults raise a `FLT n` counter on the panel and print to serial. The counter
+  clears itself after `FAULT_CLEAR_MS` of quiet, so it means "faults in a
+  rolling window", not "since boot".
+- Sustained failure (`MAX_FAULTS_BEFORE_HALT` inside that window) halts on the
+  red screen instead of showing gauges it can't vouch for.
+- `config.WATCHDOG_TIMEOUT_S` covers the other failure shape - a hang rather
+  than a raise. Off by default; see its comment.
+- `config.validate()` runs before any hardware is touched, so a mis-edited
+  setting is a named message at startup rather than a `ZeroDivisionError`
+  three pages into the UI an hour later.
+
+## Testing
+
+`python tests/run_tests.py` - 154 tests, desktop Python, no hardware and no
+dependencies. `tests/stubs.py` installs inert stand-ins for the
+CircuitPython-only modules; everything under test is the real dash code, driven
+with real `struct`-packed CAN frames. This works only because no module does
+hardware work at import time - if that ever changes, the stubs will be the
+first thing to notice.
+
 ## Known trade-offs
 
 - `bitmap_label` re-rasterizes on text change - fine at "a few changes/sec",
   wrong for text that changes every tick (nothing here does).
 - The datalog `flush()`-per-row briefly stalls the loop while logging; accepted
   so a key-off never loses more than one row.
-- Peaks/low/average survive stale data on purpose and reset only at power-off.
+- Peaks/low/average survive stale data on purpose. They now reset on a touch
+  hold as well as at power-off - a power cycle also ends the datalog session,
+  which made it a poor way to clear a peak.
+- The alarm banner blinks, which is the one thing that dirties a display
+  region on a tick when no value changed. It only does so while a channel is
+  actually in alarm.

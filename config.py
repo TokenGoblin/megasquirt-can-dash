@@ -39,6 +39,25 @@ DEBUG_INTERVAL_MS = 2000
 # of the bus must agree, so only change this if you changed it in the ECU.
 CAN_BAUD_RATE = 500_000
 
+# True = open the CAN controller in SILENT mode: the transmit pin is held
+# high and the dash cannot put anything on the bus at all, not even an
+# acknowledge. False (default) = a normal bus participant.
+#
+# Read this before changing it, because neither setting is safe in every
+# install. A normal node ACKs the frames it receives and signals errors it
+# detects - so a dash with the WRONG BAUD RATE doesn't just show dashes, it
+# actively disturbs the bus, and auto_restart means it keeps doing so. If your
+# bus carries traffic the engine depends on (an MS3 expansion board, a CAN
+# wideband, a CAN-connected ignition or transmission controller), silent mode
+# removes that risk entirely.
+#
+# But on the two-node bus this project describes - one MegaSquirt, one dash -
+# the dash is the ECU's ONLY source of acknowledges. Go silent there and the
+# ECU sees an unacknowledged bus and eventually goes error-passive itself.
+# So: leave False for a plain ECU-plus-dash bus, consider True only when
+# other nodes are present to do the acknowledging.
+CAN_SILENT_MODE = False
+
 # First CAN ID of the 4-frame broadcast block. TunerStudio: CAN-bus/Testmodes
 # -> "Simplified Dash Broadcasting" -> "CAN ID (Base)". Default 1512 (0x5E8).
 # Valid range for standard IDs: 0-2043 (base+3 must stay <= 2047).
@@ -71,6 +90,10 @@ CAN_MAX_FRAMES_PER_UPDATE = 16
 # Milliseconds (>0) a channel may go without a fresh CAN frame before it is
 # "stale": value shows "---" in red and the NO CAN banner appears.
 STALE_TIMEOUT_MS = 1000
+
+# (The per-channel plausibility gate, and which channels keep a running
+# average or minimum, live in the PARAMETERS section below - they are indexed
+# by PARAM_*, which isn't defined until then.)
 
 # ==== DERIVED CHANNELS ======================================================
 
@@ -107,6 +130,25 @@ BARO_MAX_KPA = 110.0
 # settles a step change in a couple of seconds at the ~18 Hz frame rate
 # while shrugging off single-frame noise.
 BARO_FILTER_SHIFT = 3
+
+# How many CONSECUTIVE engine-off frames must agree before the reference
+# first locks, and how far apart (kPa) they may be and still count as
+# agreeing.
+#
+# Why this exists: the plausibility window above is 55 kPa wide, so a single
+# corrupt-but-in-range frame from a still-booting ECU used to be accepted as
+# gospel - and because the reference then FREEZES the moment the engine
+# starts, that one frame could put a fixed offset on every boost reading and
+# every logged boost row for the whole drive, with nothing on screen to say
+# so. Requiring several frames to agree makes that essentially impossible;
+# an ECU emitting garbage does not emit the SAME garbage eight times running.
+#
+# 8 samples is ~0.45 s at the ~18 Hz broadcast rate - far less than the time
+# an ECU takes to boot and prime before you can crank it, so in practice the
+# lock still happens before the engine turns over. Raise for more paranoia,
+# lower if your ECU broadcasts only briefly before you start.
+BARO_LOCK_SAMPLES = 8
+BARO_LOCK_SPREAD_KPA = 0.5
 
 # Unit conversion constant (kPa per PSI). Physics - never needs changing.
 KPA_PER_PSI = 6.894757
@@ -251,6 +293,89 @@ OVERVIEW_PAGE = NUM_PARAMS      # 2x2 grid
 BEAM_PAGE = NUM_PARAMS + 1      # Boost + MAT dual beam gauges
 PAGE_COUNT = NUM_PARAMS + 2
 
+# --- Plausibility gate at the trust boundary -------------------------------
+# (min, max) in each channel's real display units, in PARAM_* order. A decoded
+# sample outside its range is DROPPED - not clamped, because a clamped value
+# is a plausible-looking lie while a dropped one shows "---" and tells the
+# truth.
+#
+# Why: CAN carries no authentication and the dash believes any frame bearing
+# the right ID. One corrupt frame that passes CRC used to flow straight into
+# the display, into PEAK/LO (which persist until power-off), and into the CSV
+# log - so a single glitch could leave "PEAK 6553.5" on the MAP page for the
+# rest of the drive with no way to clear it. These bounds are deliberately
+# WIDE: the job is rejecting the impossible, not second-guessing your engine.
+#
+# The AFR floor earns its keep twice over: a cold or unplugged wideband
+# reports 0.0, and because LO tracks the lowest AFR ever seen, that used to
+# pin "LO 0.0" for the whole session and make the readout decorative.
+SANE_RANGES = (
+    (0.0, 20000.0),     # RPM
+    (0.0, 400.0),       # MAP kPa (4 bar absolute)
+    (-20.0, 60.0),      # BOOST PSI (derived; negative is vacuum)
+    (-60.0, 350.0),     # COOLANT F
+    (-10.0, 110.0),     # TPS %
+    (5.0, 25.0),        # AFR (wire byte gives 0.0-25.5; 0 = sensor not live)
+    (0.0, 20.0),        # BATTERY V
+    (-60.0, 300.0),     # MAT F
+)
+
+# Which channels keep a running average / a running minimum. PEAK is kept for
+# every channel (every single-gauge page shows it); these two are read by
+# exactly one page each, and accumulating them for all eight was pure cost -
+# the RPM accumulator in particular outgrows CircuitPython's 31-bit small
+# integers within ~17 minutes of driving and starts allocating on the decode
+# path, in a design that is otherwise allocation-free in steady state.
+AVG_PARAMS = (PARAM_BATT,)   # Battery's "AVG" readout
+LOW_PARAMS = (PARAM_AFR,)    # AFR's "LO" readout
+
+# ==== ALARMS ================================================================
+# (low, high) alarm limits per channel in real units, in PARAM_* order; None
+# on either side means "no limit that way". Crossing a limit raises a banner
+# naming the channel and its value on EVERY page, and marks the value with a
+# trailing "!".
+#
+# Why this exists: the dash has ten pages and shows one at a time, so a
+# coolant temperature climbing into the red on page 4 was invisible from page
+# 1 - the single condition this thing exists to catch, on the channel where
+# catching it late costs an engine. Alert state was also carried by color
+# alone, which is no use to the ~8% of men with red/green color deficiency or
+# to anyone reading the panel in direct sun.
+#
+# The limits reference the SAME constants as the color tables above, so a
+# gauge's "red" and its alarm can never drift apart.
+ALARMS = (
+    (None, None),               # RPM - see note below
+    (None, None),               # MAP - boost is the one that matters
+    (None, BOOST_MAX_PSI),      # BOOST - over your ceiling
+    (None, CLT_RED_F),          # COOLANT - overheating
+    (None, None),               # TPS - no danger zone
+    (None, AFR_RED + 1.5),      # AFR - dangerously lean (the fully-red stop)
+    (BATT_LOW_V, BATT_HIGH_V),  # BATTERY - flat or overcharging
+    (None, MAT_RED_MIN_F),      # MAT - heat-soaked
+)
+
+# RPM is deliberately NOT alarmed: the shift-light bar already reports it, and
+# anyone using this on a car they rev to redline on purpose would get a
+# banner on every gear change. An alarm that cries wolf gets ignored, which
+# costs you the ones that matter.
+
+# Only alarm while the engine is actually running (RPM above
+# ENGINE_RUNNING_RPM). Leave True: a cold wideband, a cranking voltage dip,
+# and an engine-off battery reading are all "alarming" values that mean
+# nothing out of context, and a dash that shouts at key-on teaches you to
+# ignore it.
+ALARM_ONLY_WHEN_RUNNING = True
+
+# Which channel wins when several are in alarm at once - most consequential
+# first. Only channels with a limit above need appear here.
+ALARM_PRIORITY = (PARAM_CLT, PARAM_BATT, PARAM_BOOST, PARAM_MAT, PARAM_AFR)
+
+# Alarm banner blink period, ms (> 0). The banner alternates on/off at this
+# rate so it catches peripheral vision; the "!" on the value never blinks, so
+# the alarm is still legible in a still photograph.
+ALARM_BLINK_MS = 500
+
 # ==== TIMING (all milliseconds, all > 0) ====================================
 
 # UI render tick. The screen repaints (and display.refresh() runs) at
@@ -272,6 +397,34 @@ LOG_INTERVAL_MS = 100
 # time.sleep() is allowed, since the main loop hasn't started yet.
 SPLASH_DURATION_S = 2.0
 SPLASH_IMAGE_PATH = "/splash.bmp"  # 240x320 16-bit RGB565 BMP; silently skipped if absent
+
+# ==== FAULT CONTAINMENT =====================================================
+# The main loop catches exceptions instead of dying: a fault in ANY subsystem
+# (a yanked SD card, a glitching touch chip) must never take the display down
+# with it. These control what happens after a catch.
+
+# Faults tolerated before the loop gives up and shows the red fatal screen.
+# The counter clears itself after FAULT_CLEAR_MS quiet, so this really means
+# "this many faults inside one rolling window" - a lone glitch every few
+# minutes keeps the dash alive; something failing continuously halts it.
+MAX_FAULTS_BEFORE_HALT = 20
+
+# Quiet period (ms, > 0) after which the fault counter resets and the on-screen
+# FLT indicator clears.
+FAULT_CLEAR_MS = 5000
+
+# Hardware watchdog timeout in SECONDS (float). The loop feeds it every pass;
+# if the loop ever hangs (rather than raising) the chip resets and the dash
+# comes back on its own. 0 = disabled.
+#
+# Left DISABLED by default on purpose, for two reasons worth knowing before you
+# turn it on: (1) not every CircuitPython port exposes microcontroller.watchdog
+# - if yours doesn't, code.py just reports that over serial and carries on;
+# (2) in RESET mode the timer keeps running after your code stops, so a board
+# sitting at the REPL for development reboots every few seconds. Set this to
+# ~4.0 for a dash that lives in a car (comfortably above the worst measured
+# loop time - see PERFORMANCE.md), and back to 0 while developing on the bench.
+WATCHDOG_TIMEOUT_S = 0.0
 
 # ==== TOUCH (TSC2007 resistive panel) =======================================
 # Navigation is tap-zone based, NOT swipe: this resistive panel is too clunky
@@ -295,6 +448,13 @@ TOUCH_PRESSURE_THRESHOLD = 100
 # Width of the "previous page" zone as a fraction of screen width (0.0-1.0).
 # 0.5 splits the screen in half with no dead zone.
 TAP_ZONE_FRACTION = 0.5
+
+# Hold this long (ms, > 0) to reset every PEAK / LO / AVG readout - the only
+# way to clear them short of a power cycle, which also ends your datalog
+# session. The page-change the press already fired is undone, so a hold leaves
+# you where you were. Confirmation is the readouts themselves snapping to
+# "PEAK ---".
+TOUCH_HOLD_MS = 1500
 
 # ==== DISPLAY / LAYOUT ======================================================
 # Portrait orientation: 240 wide x 320 tall.
@@ -329,6 +489,12 @@ UNITS_SCALE = 2
 PEAK_CENTER_Y = 255
 PEAK_SCALE = 2
 ARROW_SCALE = 3
+
+# Barometric-reference readout, shown on the Boost page only (small, below
+# the peak line). Boost is MAP minus this reference, so when the reference is
+# a guess rather than a measurement the number above it is a guess too - the
+# readout says which.
+BARO_CENTER_Y = 278
 
 # Page indicator dots along the bottom.
 DOTS_Y = 300
@@ -410,3 +576,141 @@ LOG_DIR = "/sd/logs"
 # RPM rises past this and stops when it falls back below. 300 sits safely
 # between cranking and the lowest realistic idle.
 ENGINE_RUNNING_RPM = 300
+
+
+# ==== VALIDATION ============================================================
+# Called once by code.py before anything is constructed. This file is the one
+# users are invited to edit, and several plausible edits used to fail LATER,
+# somewhere else, with a traceback that never names the setting: swapping
+# TS_RAW_X_MIN/MAX to the same value divided by zero on the first screen tap;
+# a bar whose min equals its max divided by zero the first time you navigated
+# to that page. Fail at startup instead, naming the setting.
+
+def validate():
+    """Check the settings above for values that would crash or mislead later.
+
+    Returns None when everything is sane, else a SHORT message naming the
+    first bad setting - short because it goes on the fatal screen, which fits
+    about 20 characters. The full explanation for every problem found is
+    printed to the USB serial console.
+    """
+    problems = []
+
+    def _check(ok, name, detail):
+        if not ok:
+            problems.append((name, detail))
+
+    # --- things that divide, and therefore must never be zero -------------
+    _check(TS_RAW_X_MIN != TS_RAW_X_MAX, "TS_RAW_X",
+           "TS_RAW_X_MIN and TS_RAW_X_MAX must differ (swap them to reverse "
+           "left/right, don't equalize them)")
+    _check(SHIFT_BAR_MAX_RPM > 0, "SHIFT_BAR_RPM", "SHIFT_BAR_MAX_RPM must be > 0")
+    _check(SHIFT_BAR_SEGMENTS > 0, "SHIFT_SEGMENTS", "SHIFT_BAR_SEGMENTS must be > 0")
+    _check(KPA_PER_PSI > 0, "KPA_PER_PSI", "KPA_PER_PSI must be > 0")
+    for name, lo, hi in (
+        ("CLT_BAR", CLT_BAR_MIN_F, CLT_BAR_MAX_F),
+        ("MAT_BAR", MAT_BAR_MIN_F, MAT_BAR_MAX_F),
+        ("TPS_BAR", TPS_BAR_MIN_PCT, TPS_BAR_MAX_PCT),
+        ("MAP_BAR", MAP_BAR_MIN, MAP_BAR_MAX),
+        ("BATT_BAR", BATT_BAR_MIN, BATT_BAR_MAX),
+        ("BOOST_BAR", BOOST_MIN_PSI, BOOST_MAX_PSI),
+    ):
+        _check(hi > lo, name, "{} max must be greater than min".format(name))
+    _check(AFR_BAR_MIN < AFR_BAR_CENTER < AFR_BAR_MAX, "AFR_BAR",
+           "AFR_BAR_MIN < AFR_BAR_CENTER < AFR_BAR_MAX must hold")
+
+    # --- CAN ---------------------------------------------------------------
+    _check(0 <= BASE_CAN_ID <= 2044, "BASE_CAN_ID",
+           "BASE_CAN_ID must be 0-2044 (base+3 has to stay a valid 11-bit ID)")
+    _check(CAN_BAUD_RATE > 0, "CAN_BAUD_RATE", "CAN_BAUD_RATE must be > 0")
+    _check(CAN_MAX_FRAMES_PER_UPDATE > 0, "CAN_MAX_FRAMES",
+           "CAN_MAX_FRAMES_PER_UPDATE must be > 0 or no frame is ever decoded")
+    for name, ofs, width in (
+        ("OFS_MAP", OFS_MAP, 2), ("OFS_RPM", OFS_RPM, 2), ("OFS_CLT", OFS_CLT, 2),
+        ("OFS_TPS", OFS_TPS, 2), ("OFS_MAT", OFS_MAT, 2), ("OFS_BATT", OFS_BATT, 2),
+        ("OFS_AFR1", OFS_AFR1, 1),
+    ):
+        _check(0 <= ofs <= 8 - width, name,
+               "{} = {} doesn't fit inside an 8-byte frame".format(name, ofs))
+
+    # --- barometric --------------------------------------------------------
+    _check(BARO_MIN_KPA < BARO_MAX_KPA, "BARO_RANGE",
+           "BARO_MIN_KPA must be below BARO_MAX_KPA")
+    _check(BARO_FILTER_SHIFT >= 0, "BARO_SHIFT", "BARO_FILTER_SHIFT must be >= 0")
+    _check(BARO_LOCK_SAMPLES >= 1, "BARO_SAMPLES", "BARO_LOCK_SAMPLES must be >= 1")
+    _check(BARO_LOCK_SPREAD_KPA >= 0, "BARO_SPREAD", "BARO_LOCK_SPREAD_KPA must be >= 0")
+    _check(ATMOSPHERIC_KPA_OVERRIDE is None or ATMOSPHERIC_KPA_OVERRIDE > 0,
+           "BARO_OVERRIDE", "ATMOSPHERIC_KPA_OVERRIDE must be None or a positive kPa")
+
+    # --- timing (all milliseconds, all > 0) --------------------------------
+    for name, value in (
+        ("STALE_TIMEOUT", STALE_TIMEOUT_MS), ("UI_TICK_MS", UI_TICK_MS),
+        ("TOUCH_POLL_MS", TOUCH_POLL_MS), ("LOG_INTERVAL_MS", LOG_INTERVAL_MS),
+        ("DEBUG_INTERVAL", DEBUG_INTERVAL_MS), ("FAULT_CLEAR_MS", FAULT_CLEAR_MS),
+    ):
+        _check(value > 0, name, "{} must be > 0 ms".format(name))
+    _check(MAX_FAULTS_BEFORE_HALT >= 1, "MAX_FAULTS", "MAX_FAULTS_BEFORE_HALT must be >= 1")
+    _check(WATCHDOG_TIMEOUT_S >= 0, "WATCHDOG", "WATCHDOG_TIMEOUT_S must be >= 0 (0 = off)")
+    _check(SPLASH_DURATION_S >= 0, "SPLASH", "SPLASH_DURATION_S must be >= 0")
+
+    # --- touch / display / pages -------------------------------------------
+    _check(0.0 < TAP_ZONE_FRACTION < 1.0, "TAP_ZONE",
+           "TAP_ZONE_FRACTION must be between 0 and 1 exclusive, or one tap "
+           "zone becomes unreachable")
+    _check(DISPLAY_ROTATION in (0, 90, 180, 270), "ROTATION",
+           "DISPLAY_ROTATION must be 0, 90, 180 or 270")
+    _check(SCREEN_W > 0 and SCREEN_H > 0, "SCREEN", "SCREEN_W/H must be > 0")
+    _check(len(PAGES) == NUM_PARAMS, "PAGES", "NUM_PARAMS must match len(PAGES)")
+    for i, entry in enumerate(PAGES):
+        _check(len(entry) == 3 and entry[2] in (0, 1), "PAGES",
+               "PAGES[{}] must be (name, units, decimals) with decimals 0 or 1".format(i))
+    _check(len(GRID_PARAMS) == len(GRID_NAME_POS) == len(GRID_VALUE_POS), "GRID",
+           "GRID_PARAMS, GRID_NAME_POS and GRID_VALUE_POS must be the same length")
+
+    # --- plausibility gate and alarms --------------------------------------
+    # A short SANE_RANGES would index out of bounds on the decode path, i.e.
+    # on the first CAN frame - exactly the kind of late, confusing failure
+    # this function exists to pull forward to startup.
+    _check(len(SANE_RANGES) == NUM_PARAMS, "SANE_RANGES",
+           "SANE_RANGES needs one (min, max) entry per channel")
+    if len(SANE_RANGES) == NUM_PARAMS:
+        for p, (lo, hi) in enumerate(SANE_RANGES):
+            _check(lo < hi, "SANE_RANGES",
+                   "SANE_RANGES[{}] ({}) must have min < max".format(p, PAGES[p][0]))
+    _check(len(ALARMS) == NUM_PARAMS, "ALARMS",
+           "ALARMS needs one (low, high) entry per channel")
+    if len(ALARMS) == NUM_PARAMS and len(SANE_RANGES) == NUM_PARAMS:
+        for p, (lo, hi) in enumerate(ALARMS):
+            sane_lo, sane_hi = SANE_RANGES[p]
+            # A limit outside the plausibility gate can never fire: the
+            # sample would be dropped before anything could compare it.
+            _check(lo is None or sane_lo < lo < sane_hi, "ALARMS",
+                   "ALARMS[{}] low limit is outside SANE_RANGES[{}]".format(p, p))
+            _check(hi is None or sane_lo < hi < sane_hi, "ALARMS",
+                   "ALARMS[{}] high limit is outside SANE_RANGES[{}]".format(p, p))
+            _check(lo is None or hi is None or lo < hi, "ALARMS",
+                   "ALARMS[{}] low limit must be below its high limit".format(p))
+            if lo is not None or hi is not None:
+                _check(p in ALARM_PRIORITY, "ALARM_PRIORITY",
+                       "{} has alarm limits but isn't in ALARM_PRIORITY, so it "
+                       "can never raise one".format(PAGES[p][0]))
+    for p in ALARM_PRIORITY:
+        _check(0 <= p < NUM_PARAMS, "ALARM_PRIORITY",
+               "ALARM_PRIORITY entry {} is not a valid PARAM_* index".format(p))
+    _check(ALARM_BLINK_MS > 0, "ALARM_BLINK", "ALARM_BLINK_MS must be > 0 ms")
+    for p in AVG_PARAMS:
+        _check(0 <= p < NUM_PARAMS, "AVG_PARAMS", "bad PARAM_* index in AVG_PARAMS")
+    for p in LOW_PARAMS:
+        _check(0 <= p < NUM_PARAMS, "LOW_PARAMS", "bad PARAM_* index in LOW_PARAMS")
+    _check(TOUCH_HOLD_MS > 0, "TOUCH_HOLD_MS", "TOUCH_HOLD_MS must be > 0 ms")
+    for p in GRID_PARAMS:
+        _check(0 <= p < NUM_PARAMS, "GRID_PARAMS",
+               "GRID_PARAMS entry {} is not a valid PARAM_* index".format(p))
+    _check(ENGINE_RUNNING_RPM >= 0, "ENGINE_RPM", "ENGINE_RUNNING_RPM must be >= 0")
+
+    if not problems:
+        return None
+    print("--- config.py problems ---")
+    for name, detail in problems:
+        print("  {}: {}".format(name, detail))
+    return "CFG: " + problems[0][0]
