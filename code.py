@@ -64,8 +64,22 @@ except Exception as e:  # pylint: disable=broad-except
     print("config.validate() could not run - config.py is malformed:", e)
     _config_error = "CFG: MALFORMED"
 
-# 1. Display first - it shows the boot splash while everything else builds,
-#    and constructing DashUI claims the shared SPI bus via board.SPI().
+# Hand the validator's memory back before anything else allocates. It has
+# done its whole job for this power cycle, and its error messages are written
+# for a human reading a serial console - which makes them, measured on the
+# board, about 6 KB of strings that would otherwise sit in the heap for the
+# entire drive. That is a quarter of what the display needs to build its
+# widgets, and this dash ran out of memory constructing them before this
+# existed. Diagnostics you can afford are better than diagnostics you can't.
+try:
+    del config.validate
+except (AttributeError, NameError):
+    pass
+gc.collect()
+
+# 1. Display first - it comes up blank in well under a second and gives
+#    every later failure somewhere to report itself. Constructing DashUI
+#    also claims the shared SPI bus via board.SPI().
 dash = ui.DashUI()
 if _config_error:
     dash.show_fatal(_config_error)   # never returns; details went to serial
@@ -85,9 +99,9 @@ dash.set_touch_available(nav.available)
 logger = datalog.DataLogger(board.SPI())
 
 
-# 4. Watchdog, armed LAST - after the splash's 2 s sleep and all the slow
-#    construction above, which would trip it. Disabled by default; see
-#    config.WATCHDOG_TIMEOUT_S for why and when to turn it on.
+# 4. Watchdog, armed LAST - after all the slow construction above, which
+#    would trip it. Disabled by default; see config.WATCHDOG_TIMEOUT_S for
+#    why and when to turn it on.
 def _arm_watchdog():
     """Return a fed-per-pass watchdog, or None if unavailable/disabled."""
     if not config.WATCHDOG_TIMEOUT_S or microcontroller is None:
@@ -110,9 +124,8 @@ def _arm_watchdog():
 # (see PERFORMANCE.md), so further collections are rare and tiny.
 gc.collect()
 
-# Armed only now: everything above (the 2 s splash sleep, display
-# construction, the SD probe, this collection) is slower than any sane
-# watchdog timeout.
+# Armed only now: everything above (display construction, the SD probe,
+# this collection) is slower than any sane watchdog timeout.
 wdt = _arm_watchdog()
 
 if config.DEBUG:

@@ -49,7 +49,6 @@ real-world testing.
   banner (also raised instantly if the CAN controller reports a failed bus state)
 - **Engine-gated CSV datalogging** to microSD, MegaLogViewer HD compatible
 - **Tap navigation** - left half = previous page, right half = next page
-- **Custom boot splash** from a BMP on the CIRCUITPY drive
 - Strictly **non-blocking** cooperative main loop; see [PERFORMANCE.md](PERFORMANCE.md)
 
 ## Hardware
@@ -143,8 +142,9 @@ Copy these repo files to the **root** of the `CIRCUITPY` drive:
 code.py  config.py  canbus.py  ui.py  touch.py  datalog.py  ticks.py  boot.py
 ```
 
-CircuitPython auto-runs `code.py` on power-up. Optionally add a `splash.bmp`
-(see [Custom splash screen](#custom-splash-screen)).
+CircuitPython auto-runs `code.py` on power-up. Nothing else is needed - the
+dash comes up blank within about a second and starts drawing as soon as the
+first CAN frames arrive.
 
 ## Usage
 
@@ -248,22 +248,6 @@ own. It is off by default because not every CircuitPython port supports it
 the timer keeps running while you sit at the REPL, which reboots the board
 every few seconds while you're developing.
 
-## Custom splash screen
-
-`code.py` shows `/splash.bmp` for 2 s at boot if present (silently skipped
-otherwise). Requirements: exactly **240x320**, **16-bit RGB565 BMP** (displayio's
-`OnDiskBitmap` doesn't reliably read 24/32-bit BMPs). Quick conversion on Windows
-PowerShell:
-
-```powershell
-Add-Type -AssemblyName System.Drawing
-$src = [System.Drawing.Image]::FromFile("your-image.png")
-$dest = New-Object System.Drawing.Bitmap 240, 320, ([System.Drawing.Imaging.PixelFormat]::Format16bppRgb565)
-$g = [System.Drawing.Graphics]::FromImage($dest)
-$g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-$g.DrawImage($src, 0, 0, 240, 320)
-$dest.Save("splash.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
-```
 
 ## Troubleshooting
 

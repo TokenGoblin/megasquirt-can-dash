@@ -2,6 +2,8 @@
 # constructed - the bar classes' _px helpers are called against a minimal
 # stand-in carrying just the two range attributes they read.
 
+import contextlib
+import io
 import unittest
 
 import stubs
@@ -238,6 +240,101 @@ class TestTopRowLayout(unittest.TestCase):
         widest = "BARO " + canbus.format_x10(
             int(config.BARO_MAX_KPA * 10), 1) + " EST"
         self.assertLessEqual(len(widest) * self.CHAR_W, config.SCREEN_W)
+
+
+class _RecordingDisplayio:
+    """Fake displayio that records every Bitmap allocation, so a test can
+    assert what the fatal screen actually asks the heap for."""
+
+    def __init__(self, real):
+        self._real = real
+        self.bitmaps = []
+
+    def Bitmap(self, w, h, n):
+        self.bitmaps.append((w, h, n))
+        return object()
+
+    def Palette(self, n):
+        return {}
+
+    def Group(self, **kwargs):
+        return []                        # a list is append-able, which is all
+                                         # displayio.Group is used for here
+
+    def TileGrid(self, *args, **kwargs):
+        return object()
+
+
+class _FakeDisplay:
+    def __init__(self):
+        self.root_group = None
+        self.refreshed = 0
+
+    def refresh(self, **kwargs):
+        self.refreshed += 1
+
+
+class TestFatalScreenIsCheap(unittest.TestCase):
+    """Found on hardware, not here: show_fatal used to build its red
+    background as a full-screen 240x320 Bitmap - about 9.6 KB - and died with
+    a MemoryError while trying to report a fault. The situation that summons
+    a fatal screen is very often 'out of memory', so the error path must be
+    the cheapest code in the project, not the most expensive.
+    """
+
+    def setUp(self):
+        self.dash = ui.DashUI.__new__(ui.DashUI)      # no hardware needed
+        self.dash.display = _FakeDisplay()
+        self.dash._root = object()
+        self.fake = _RecordingDisplayio(ui.displayio)
+        self._saved = ui.displayio
+        ui.displayio = self.fake
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        ui.displayio = self._saved
+
+    def test_background_scale_divides_the_screen_exactly(self):
+        """A scale that doesn't divide would leave an unpainted edge."""
+        self.assertEqual(config.SCREEN_W % ui._FATAL_BG_SCALE, 0)
+        self.assertEqual(config.SCREEN_H % ui._FATAL_BG_SCALE, 0)
+
+    def test_never_allocates_a_full_screen_bitmap(self):
+        self.dash._draw_fatal("TEST")
+        full = config.SCREEN_W * config.SCREEN_H
+        for w, h, _n in self.fake.bitmaps:
+            self.assertLess(w * h, full // 8,
+                            "fatal screen allocated a {}x{} bitmap".format(w, h))
+
+    def test_background_still_covers_the_whole_panel(self):
+        self.dash._draw_fatal("TEST")
+        self.assertTrue(self.fake.bitmaps, "no background bitmap was made")
+        w, h, _ = self.fake.bitmaps[0]
+        self.assertEqual(w * ui._FATAL_BG_SCALE, config.SCREEN_W)
+        self.assertEqual(h * ui._FATAL_BG_SCALE, config.SCREEN_H)
+
+    def test_releases_the_dash_widget_tree_first(self):
+        """Whatever memory the old UI held has to come back before we ask for
+        more."""
+        self.dash._draw_fatal("TEST")
+        self.assertIsNone(self.dash._root)
+
+    def test_refreshes_so_the_message_actually_reaches_the_panel(self):
+        self.dash._draw_fatal("TEST")
+        self.assertGreaterEqual(self.dash.display.refreshed, 1)
+
+    def test_survives_a_display_that_is_itself_broken(self):
+        """Last-ditch: if even this fails there is nowhere left to report it,
+        so it must not raise on the way out."""
+        class Broken:
+            def __setattr__(self, k, v):
+                raise RuntimeError("display is gone")
+
+            def refresh(self, **kwargs):
+                raise RuntimeError("display is gone")
+        self.dash.display = Broken()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.dash._draw_fatal("TEST")    # must not raise
 
 
 class TestShiftLightColors(unittest.TestCase):

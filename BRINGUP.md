@@ -20,6 +20,76 @@ Delete this file once you're green, or keep it for the next big change.
 
 ---
 
+## Results - bench run, 2026-08-11
+
+Stages 0-3 and 8 were run against the real board (CircuitPython 10.2.1 on
+Feather M4 CAN, `same51j19a`), with no CAN bus and no SD card attached. **Two
+real bugs were found, both of which only hardware could have found.**
+
+| Stage | Result |
+|---|---|
+| 0 Backup | Done - `Documents\CIRCUITPY-backup-2026-08-11-1839`, 34 files |
+| 1 Boots at all | **FAILED first, then fixed.** `MemoryError` in `_bordered_fill_bar` - the dash would not start |
+| 2 Memory / timing | 834-842 loops/s, worst 5-13 ms, **16.5 KB free** (was ~24 KB) |
+| 3 Layout | Deferred - needs eyes on the panel |
+| 4 Touch | Deferred - needs hands |
+| 5 SD card | Deferred - no card to hand |
+| 6 CAN / baro | Deferred - needs a live ECU |
+| 7 Alarms | Deferred - needs CAN |
+| 8 Fault containment | **Passed, after fixing a second bug.** 20 faults counted, cleared, escalated to the red screen exactly as designed |
+| 9 Watchdog | Not exercised (left off by default) |
+| 10 In-car soak | Deferred |
+
+### Bug 1 - the dash would not boot
+
+`config.validate()` cost **6.1 KB of string constants**, measured with
+`del config.validate; gc.collect()` at the REPL. Its messages are written for
+a human at a serial console, and they sat in the heap for the whole drive.
+With the display needing every byte to build its widgets, construction died
+with `MemoryError: memory allocation failed, allocating 952 bytes`.
+
+Fixed by deleting the validator after it runs (`code.py`) - full diagnostics
+at startup, none of the cost afterwards.
+
+### Bug 2 - the fatal screen could not draw itself
+
+Found by accident while testing something else, and worse than bug 1.
+`show_fatal()` built its red background as a full-screen 240x320 bitmap
+(~9.6 KB). Fault containment worked perfectly - 20 faults counted, escalation
+triggered - and then:
+
+```
+Traceback (most recent call last):
+  File "ui.py", line 914, in show_fatal
+MemoryError: memory allocation failed, allocating 10240 bytes
+```
+
+The error screen failed **because** the thing it was reporting was memory
+pressure. A fail-open error path: exactly the class of defect the audit's own
+severity rules call out. Now painted with a 1/8-scale bitmap in a scaled Group
+(~150 bytes), and verified on the board: the red `LOOP FAULT` screen appears
+under the same conditions that killed it before.
+
+### Also confirmed on hardware
+
+- `canio.CAN(silent=...)` **is** accepted on this build - the biggest API
+  guess in the change set is settled.
+- `config.validate()` returns `None` for the shipped config on the device.
+- The TSC2007 was found (no `NO TOUCH`), so touch hardware is live.
+- CircuitPython **discards docstrings** (`hasattr(f, "__doc__")` is `False`),
+  so this project's documentation costs zero RAM.
+- 40 s of continuous page cycling at 3 Hz: no faults, no `MemoryError`. Page
+  changes cost 250-340 ms each at that rate; the loop returns to ~840 loops/s
+  immediately after.
+- The boot splash was removed at the owner's request (it added ~2 s to a
+  ~6.6 s boot). Boot is now ~4.6 s, essentially all CircuitPython import and
+  hardware probing.
+
+**Left on the drive:** `_mem_probe.py`, a scratch file from this session,
+overwritten with a comment. Safe to delete whenever.
+
+---
+
 ## Stage 0 - Before you plug anything in
 
 - [ ] **Keep a known-good copy.** Copy the current contents of `CIRCUITPY` to
@@ -181,10 +251,6 @@ for checking layout: the widest possible corner banners are all showing at once.
       the session. **Do it for real anyway** - what the tests cannot tell you
       is how the actual SD driver behaves when the card leaves the socket
       mid-transaction, which is a different thing from `write()` raising.
-- [ ] Drop a deliberately broken `splash.bmp` on the drive (any 24-bit PNG
-      renamed will do). It should be skipped silently with a serial note, and
-      the dash should boot normally. This is F-10, and it also settles
-      UNVERIFIED item 5.
 
 ---
 

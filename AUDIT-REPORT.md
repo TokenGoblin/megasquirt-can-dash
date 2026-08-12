@@ -28,6 +28,9 @@ Performed 2026-08-11 against `AUDIT.md` §0–§19.
 > | F-16 sub-threshold press churn | Fixed — bounded retry, then written off until lift |
 > | F-17 banner coverage | Fixed — falls out of F-05 |
 > | F-18 silent touch failure | Fixed — `NO TOUCH` on the panel |
+> | F-10 (revisited) | **Moot** — the boot splash was removed entirely at the owner's request, so there is no image load left to fail |
+> | F-19 validator held 6.1 KB for the whole drive | **Found on hardware.** Fixed — `config.validate()` is deleted after it runs. Before this the dash did not boot at all |
+> | F-20 `show_fatal()` died of `MemoryError` | **Found on hardware.** Fixed — the fatal screen now costs ~150 bytes instead of ~9.6 KB. A fail-open error path: it broke precisely when reporting memory pressure |
 >
 > **Nothing is left open, but two things were deliberately not "fixed" the
 > obvious way**, and both deserve the author's eye:

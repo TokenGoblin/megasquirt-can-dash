@@ -157,15 +157,40 @@ too). Why this matters on CircuitPython:
 
 ## Measured rates (CircuitPython 10.2.1, Feather M4 CAN, `DEBUG = True`)
 
-| Thing | Measured / configured |
-|---|---|
-| Main loop | **~830 loops/s** bench (no CAN); **~640-820 loops/s** on a live bus (~53 frames/s) |
-| Worst loop pass | **5-10 ms** typical peak (a render tick); **~125-177 ms** occasional GC spike on a live bus with DEBUG on (the ~53 canio message allocations/s churn the heap; a spike costs 2-3 of the 20 Hz frames a few times a minute - imperceptible, and lower with DEBUG's own print allocations off) |
-| Display refresh | fixed 20 Hz (`UI_TICK_MS = 50`) |
-| Touch poll | 50 Hz (`TOUCH_POLL_MS = 20`) |
-| CAN decode capacity | ≥ 13,000 frames/s ceiling (16/pass × 830 passes/s) vs ~40-200/s actually broadcast |
-| Heap | ~24 KB free after startup; sawtooths ~9-24 KB with DEBUG's own print allocations, GC pauses absorbed inside the 11 ms worst case |
-| Datalog | 10 Hz rows, `flush()` per row (SD flush is the loop's one intentional stall, a few ms, engine-running only - the price of crash-proof logs) |
+Re-measured on the bench after the audit remediation (no CAN bus, no SD card
+attached), against the pre-change figures:
+
+| Thing | Now | Before |
+|---|---|---|
+| Main loop | **834-842 loops/s** bench | ~830 loops/s |
+| Worst loop pass | **5-13 ms** typical peak | 5-10 ms |
+| Free heap after startup | **~16.5 KB** | ~24 KB |
+| Heap sawtooth (`DEBUG = True`) | ~3.5-13.5 KB | ~9-24 KB |
+| Cold boot to first frame | **~4.6 s** | ~6.6 s (2 s of it the boot splash, since removed) |
+| Display refresh | fixed 20 Hz (`UI_TICK_MS = 50`) | unchanged |
+| Touch poll | 50 Hz (`TOUCH_POLL_MS = 20`) | unchanged |
+| CAN decode capacity | 16/pass x ~840 passes/s | unchanged |
+| Datalog | 10 Hz rows, `flush()` per row | unchanged |
+
+**The heap is the number that moved.** Cross-page alarms, the plausibility
+gate, config validation, three new status labels and the richer touch/datalog
+logic cost roughly 7.5 KB of headroom. Two things were done to claw memory
+back rather than simply pay it:
+
+- `config.validate()` is **deleted after it runs** (see `code.py`). Its error
+  messages are written for a human at a serial console, which measured 6.1 KB
+  of string constants on the board - about a quarter of what the display needs
+  to build its widgets. Before this, the dash did not boot at all: it died
+  with `MemoryError` inside `_bordered_fill_bar`.
+- The fatal screen paints its background with a **1/8-scale bitmap inside a
+  scaled Group**, roughly 150 bytes instead of 9.6 KB. Not a micro-
+  optimisation: the old full-screen bitmap made `show_fatal()` itself die of
+  `MemoryError` while trying to report a fault, which is the one moment it
+  must not.
+
+Page switching is the heaviest routine operation - a full repaint, measured at
+250-340 ms per change when driven continuously at 3 Hz. Real tapping is
+nowhere near that rate, and the loop returns to ~840 loops/s immediately after.
 
 ## Fault containment
 

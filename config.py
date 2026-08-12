@@ -393,11 +393,6 @@ TOUCH_POLL_MS = 20
 # faster grows files and SD wear for little tuning benefit.
 LOG_INTERVAL_MS = 100
 
-# Boot splash display time, seconds (float). Startup-only - the ONE place
-# time.sleep() is allowed, since the main loop hasn't started yet.
-SPLASH_DURATION_S = 2.0
-SPLASH_IMAGE_PATH = "/splash.bmp"  # 240x320 16-bit RGB565 BMP; silently skipped if absent
-
 # ==== FAULT CONTAINMENT =====================================================
 # The main loop catches exceptions instead of dying: a fault in ANY subsystem
 # (a yanked SD card, a glitching touch chip) must never take the display down
@@ -651,7 +646,6 @@ def validate():
         _check(value > 0, name, "{} must be > 0 ms".format(name))
     _check(MAX_FAULTS_BEFORE_HALT >= 1, "MAX_FAULTS", "MAX_FAULTS_BEFORE_HALT must be >= 1")
     _check(WATCHDOG_TIMEOUT_S >= 0, "WATCHDOG", "WATCHDOG_TIMEOUT_S must be >= 0 (0 = off)")
-    _check(SPLASH_DURATION_S >= 0, "SPLASH", "SPLASH_DURATION_S must be >= 0")
 
     # --- touch / display / pages -------------------------------------------
     _check(0.0 < TAP_ZONE_FRACTION < 1.0, "TAP_ZONE",

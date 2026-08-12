@@ -36,7 +36,7 @@
 #  to distinguish red from green.
 # ============================================================================
 
-import time
+import gc
 
 import board
 import displayio
@@ -203,6 +203,14 @@ _MARKER_AVG = 1    # orange line at the running average, its own TileGrid
 # compare equal to that - suppressing the very first "PEAK ---" paint (a bug
 # caught on the bench: the peak line never appeared with no CAN attached).
 _UNSET = object()
+
+# Scale factor for the fatal screen's background: a bitmap this many times
+# smaller in each axis, drawn inside a scaled Group, covers the whole panel
+# for a fraction of the memory (see show_fatal). Falls back to 1 if it
+# wouldn't divide the screen exactly.
+_FATAL_BG_SCALE = (
+    8 if (config.SCREEN_W % 8 == 0 and config.SCREEN_H % 8 == 0) else 1
+)
 
 
 def _make_label(font_scale, color, anchor, position, text=""):
@@ -706,9 +714,9 @@ class _BeamGauge:
 class DashUI:
     """The whole screen. Construct once; then only change_page() + update().
 
-    Construction shows the boot splash (the one place time.sleep() is used -
-    the main loop hasn't started yet), then builds every page's widgets into
-    one persistent root Group. Nothing is constructed after __init__.
+    Construction builds every page's widgets into one persistent root Group.
+    Nothing is constructed after __init__, and nothing here blocks: there is
+    no time.sleep() anywhere in this project.
     """
 
     def __init__(self):
@@ -725,8 +733,6 @@ class DashUI:
         )
         # Manual refresh from here on: WE decide when SPI traffic happens.
         self.display.auto_refresh = False
-
-        self._show_splash()
 
         # ---- build all static chrome + dynamic widgets, once --------------
         root = displayio.Group()
@@ -851,30 +857,6 @@ class DashUI:
         self._c_baro = None         # last baro_x10 applied to the MAP stops
         self._c_baro_locked = None  # last lock state shown on the Boost page
 
-    # ---- boot splash --------------------------------------------------------
-
-    def _show_splash(self):
-        """Show /splash.bmp for the configured time; silently skip if absent
-        OR unloadable. Startup-only blocking (time.sleep) - the main loop
-        hasn't begun.
-
-        The catch is deliberately broad. A missing file raises OSError, but a
-        BMP displayio can't decode - a 24- or 32-bit export, which is what
-        every normal image editor produces and what the README warns about -
-        raises ValueError instead. That used to escape all the way out of
-        DashUI() and stop the dash from booting at all: a black screen, no
-        message, caused by an optional decoration.
-        """
-        try:
-            bmp = displayio.OnDiskBitmap(config.SPLASH_IMAGE_PATH)
-            grp = displayio.Group()
-            grp.append(displayio.TileGrid(bmp, pixel_shader=bmp.pixel_shader))
-            self.display.root_group = grp
-            self.display.refresh(minimum_frames_per_second=0)
-            time.sleep(config.SPLASH_DURATION_S)
-        except Exception as e:  # pylint: disable=broad-except
-            print("Splash image not found/failed to load:", e)
-
     # ---- one-shot status from subsystems ----------------------------------
 
     def set_touch_available(self, available):
@@ -909,21 +891,57 @@ class DashUI:
 
     def show_fatal(self, message):
         """Full red screen + message, then halt forever. For unrecoverable
-        startup failures (e.g. CAN peripheral init) where the dash is
-        useless anyway. Never returns."""
-        err_bmp = displayio.Bitmap(config.SCREEN_W, config.SCREEN_H, 1)
-        err_pal = displayio.Palette(1)
-        err_pal[0] = 0xFF0000
-        grp = displayio.Group()
-        grp.append(displayio.TileGrid(err_bmp, pixel_shader=err_pal, x=0, y=0))
-        grp.append(_make_label(
-            2, 0xFFFFFF, (0.5, 0.5),
-            (config.SCREEN_W // 2, config.SCREEN_H // 2), text=message))
-        self.display.root_group = grp
-        self.display.refresh(minimum_frames_per_second=0)
+        failures (CAN init, a bad config, a loop failing continuously) where
+        the dash is useless anyway. Never returns.
+
+        This function must be able to run when there is almost no memory
+        left. It used to build the red background as a full-screen 240x320
+        Bitmap - about 9.6 KB - and on the bench it did exactly what you would
+        fear: died with a MemoryError while trying to report a fault, leaving
+        a traceback on the serial console and a dead panel. An error screen
+        that needs memory in order to appear is not an error screen.
+
+        So: drop the dash's own widget tree first, then paint the background
+        with a tenth-scale bitmap in a scaled Group - visually identical, ~150
+        bytes instead of ~9,600.
+        """
+        self._draw_fatal(message)
         print(message)
         while True:
             pass
+
+    def _draw_fatal(self, message):
+        """Paint the fatal screen. Split out of show_fatal so it can be
+        tested - show_fatal itself never returns."""
+        # Release the live UI before allocating anything at all. Drop our own
+        # reference FIRST - that cannot fail, whereas everything after it can,
+        # and there is no point holding the widget tree hostage to a display
+        # that has already stopped answering.
+        self._root = None
+        try:
+            self.display.root_group = displayio.Group()
+            gc.collect()
+        except Exception:  # pylint: disable=broad-except
+            pass          # nothing here is worth failing the fatal screen over
+
+        try:
+            grp = displayio.Group()
+            bg = displayio.Group(scale=_FATAL_BG_SCALE)
+            bmp = displayio.Bitmap(config.SCREEN_W // _FATAL_BG_SCALE,
+                                   config.SCREEN_H // _FATAL_BG_SCALE, 1)
+            pal = displayio.Palette(1)
+            pal[0] = 0xFF0000
+            bg.append(displayio.TileGrid(bmp, pixel_shader=pal, x=0, y=0))
+            grp.append(bg)
+            grp.append(_make_label(
+                2, 0xFFFFFF, (0.5, 0.5),
+                (config.SCREEN_W // 2, config.SCREEN_H // 2), text=message))
+            self.display.root_group = grp
+            self.display.refresh(minimum_frames_per_second=0)
+        except Exception as e:  # pylint: disable=broad-except
+            # Even this failed. The serial console is all that is left, and
+            # halting quietly still beats an exception storm.
+            print("fatal screen could not be drawn:", e)
 
     # ---- page navigation --------------------------------------------------------
 

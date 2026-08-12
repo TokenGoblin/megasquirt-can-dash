@@ -67,9 +67,9 @@ class DataLogger:
         Side effects: mounts /sd and creates LOG_DIR on success; prints the
         outcome either way.
 
-        All the card work that can be done once is done HERE, at boot, while
-        the splash is up and a stall costs nothing - never at engine start,
-        where a stall costs the driver their gauges.
+        All the card work that can be done once is done HERE, at boot, where
+        a stall costs nothing - never at engine start, where a stall costs the
+        driver their gauges.
         """
         self._file = None
         self._last_write = 0            # ticks.ms() of the last row

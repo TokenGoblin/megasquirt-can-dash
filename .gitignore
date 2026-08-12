@@ -1,9 +1,6 @@
 # Pre-refactor snapshot - kept locally, never published or edited.
 backup/
 
-# Personal/local boot logo - see README.md "Custom splash screen" section.
-splash.bmp
-
 # NOTE: /lib is deliberately NOT ignored - but don't commit libraries either.
 # Users copy the required Adafruit bundle libraries into CIRCUITPY/lib per the
 # README's "CircuitPython setup" table (names + tested versions listed there).

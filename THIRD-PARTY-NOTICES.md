@@ -157,7 +157,7 @@ discontinuities, and unexplained magic numbers.
 | Category | Status |
 |---|---|
 | Fonts | None in repo. Text uses `terminalio.FONT` from the CircuitPython firmware (see note above). |
-| Icons / images | None in repo. `splash.bmp` is **user-supplied** and explicitly gitignored (`.gitignore:5-6`) — correctly treated as user input, never promoted into bundled content. The README supplies a conversion *script* rather than a sample image, which is the right pattern. |
+| Icons / images | None in repo, and none loaded at runtime — the boot splash was removed, so the dash reads no image files at all. |
 | Sound | None (no audio hardware). |
 | Sample / fixture data | None — and there are no tests, so there are no fixtures at all (see `AUDIT-REPORT.md` F-12). |
 | Datasets / model weights | None. |
