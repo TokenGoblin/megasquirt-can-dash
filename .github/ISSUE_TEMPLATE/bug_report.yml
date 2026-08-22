@@ -1,0 +1,92 @@
+name: Bug report
+description: Something on the dash behaves wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: the [Troubleshooting table](../../blob/main/README.md#troubleshooting)
+        covers most first-run symptoms (`NO CAN`, blank screen, values off by 10x,
+        reversed taps, `NO SD`). Worth a look — it'll usually be faster than waiting
+        on a reply.
+
+  - type: textarea
+    id: what-happens
+    attributes:
+      label: What happens
+      description: What the screen shows, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: serial
+    attributes:
+      label: USB serial console output
+      description: >
+        The most useful thing you can attach. Every caught fault prints its
+        exception here. Set `DEBUG = True` in config.py for loop rate, worst loop
+        time, and free memory as well.
+      render: text
+
+  - type: input
+    id: ecu
+    attributes:
+      label: ECU
+      description: Variant and firmware version.
+      placeholder: Microsquirt, MS2/Extra 3.4.3
+    validations:
+      required: true
+
+  - type: input
+    id: circuitpython
+    attributes:
+      label: CircuitPython version
+      placeholder: "10.2.1"
+    validations:
+      required: true
+
+  - type: input
+    id: bundle
+    attributes:
+      label: Adafruit library bundle date
+      placeholder: "20260710"
+
+  - type: dropdown
+    id: featherwing
+    attributes:
+      label: 2.4" TFT FeatherWing version
+      description: V1 is not supported — it uses an STMPE610 touch chip this code doesn't speak.
+      options:
+        - "V2 (TSC2007)"
+        - "V1 (STMPE610)"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did this happen
+      options:
+        - On the bench
+        - In the car, engine off
+        - In the car, engine running
+        - While driving
+    validations:
+      required: true
+
+  - type: textarea
+    id: config-changes
+    attributes:
+      label: Changes to config.py
+      description: Anything you changed from the shipped defaults.
+      render: python
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Quick checks
+      options:
+        - label: "`CAN_BAUD_RATE` matches the ECU (a mismatch puts error frames on the bus, not just a blank dash)"
+        - label: "`BASE_CAN_ID` matches TunerStudio's CAN ID (Base)"
+        - label: "`python tests/run_tests.py` passes on my checkout"

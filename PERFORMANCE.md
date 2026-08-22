@@ -213,7 +213,7 @@ glitching I2C touch chip - are the ones you would least mind losing.
 
 ## Testing
 
-`python tests/run_tests.py` - 154 tests, desktop Python, no hardware and no
+`python tests/run_tests.py` - 182 tests, desktop Python, no hardware and no
 dependencies. `tests/stubs.py` installs inert stand-ins for the
 CircuitPython-only modules; everything under test is the real dash code, driven
 with real `struct`-packed CAN frames. This works only because no module does

@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  desktop-suite:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # No install step, on purpose: the suite has zero dependencies and
+      # keeping it that way is a design constraint (see CONTRIBUTING.md).
+      - name: Run the desktop test suite
+        run: python tests/run_tests.py -v
+
+      - name: Check the shipped config.py validates
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "tests")
+          import stubs
+          stubs.install()
+          import config
+          result = config.validate()
+          if result is not None:
+              sys.exit("config.validate() reported: %s" % result)
+          print("config.validate() -> None (clean)")
+          PY

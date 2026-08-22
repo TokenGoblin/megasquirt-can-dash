@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting table
+    url: https://github.com/TokenGoblin/megasquirt-can-dash/blob/main/README.md#troubleshooting
+    about: Covers most first-run symptoms — NO CAN, blank screen, values off by 10x, NO SD.
+  - name: Hardware bring-up checklist
+    url: https://github.com/TokenGoblin/megasquirt-can-dash/blob/main/BRINGUP.md
+    about: Stage-by-stage bench validation. Work through this before the car.
+  - name: MSExtra forums
+    url: https://www.msextra.com/forums/
+    about: For MegaSquirt tuning and CAN broadcast questions that aren't about this dash.

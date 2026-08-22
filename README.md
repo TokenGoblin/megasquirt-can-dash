@@ -1,9 +1,53 @@
 # MegaSquirt CAN Digital Dash
 
+**A full-featured digital dash for MegaSquirt/Microsquirt ECUs, built from two
+off-the-shelf Adafruit boards and a few readable Python files — for a fraction of
+the cost of a commercial CAN dash.**
+
+[![CircuitPython 10.x](https://img.shields.io/badge/CircuitPython-10.x-7d5bed)](https://circuitpython.org/board/feather_m4_can/)
+[![Board: Feather M4 CAN](https://img.shields.io/badge/board-Feather%20M4%20CAN-00a2a2)](https://www.adafruit.com/product/4759)
+[![ECU: MegaSquirt MS2/Extra](https://img.shields.io/badge/ECU-MegaSquirt%20MS2%2FExtra-c8102e)](https://www.msextra.com/)
+[![Tests](https://github.com/TokenGoblin/megasquirt-can-dash/actions/workflows/tests.yml/badge.svg)](https://github.com/TokenGoblin/megasquirt-can-dash/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 A CircuitPython digital dash for a MegaSquirt Microsquirt (MS2/Extra) ECU, built on an
 Adafruit Feather M4 CAN Express with a 2.4" TFT touchscreen FeatherWing. Ten pages of
 color-coded gauges, a race-style RPM shift-light bar, continuous beam bars with
 peak-hold, a Boost/MAT beam-gauge page, and CSV datalogging to a microSD card.
+
+<!-- PHOTOS GO HERE - the highest-impact addition to this README:
+       1. The dash lit up in the car   <- this one matters most
+       2. The RPM shift-light bar mid-sweep
+       3. The 2x2 Overview page
+     Put them in docs/images/ and link as:  ![Dash in car](docs/images/dash-in-car.jpg)
+     Then set Settings -> Social preview to shot #1: that is the card people see
+     when this link is posted to a forum, Reddit, or Discord. -->
+
+> **New build?** Read [Hardware](#hardware) and
+> [Wiring and CAN termination](#wiring-and-can-termination) first, then work
+> through [BRINGUP.md](BRINGUP.md) on the bench before the car. Two of the bugs
+> in this project's history were caught by that checklist and could not have been
+> found any other way.
+
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+- [Hardware](#hardware)
+- [Wiring and CAN termination](#wiring-and-can-termination)
+- [MegaSquirt / TunerStudio configuration](#megasquirt--tunerstudio-configuration)
+- [CircuitPython setup](#circuitpython-setup)
+- [Install](#install)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Fault handling](#fault-handling)
+- [Troubleshooting](#troubleshooting)
+- [Known limitations](#known-limitations)
+- [Tests](#tests)
+- [Repo structure](#repo-structure)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Why this exists
 
@@ -270,6 +314,39 @@ every few seconds while you're developing.
 | Red `FLT n` at the top of the screen | The main loop caught and survived an error - see [Fault handling](#fault-handling). Most often a flaky microSD card (check `NO SD` in the top-left); the serial console names the exception |
 | Red `LOOP FAULT` screen | Something failed continuously, not once. The dash halted deliberately rather than show numbers it can't vouch for. Read the serial console, then power-cycle |
 
+## Known limitations
+
+Stated plainly, so you can judge the risk before wiring this into a car. Most of
+these are *not yet verified* rather than *known broken* — [BRINGUP.md](BRINGUP.md)
+is the checklist that closes them out, and [AUDIT-REPORT.md](AUDIT-REPORT.md)
+records the exact evidence that would settle each one.
+
+- **It has not been driven yet.** The bench run on 2026-08-11 covered boot,
+  memory/loop timing, and fault containment on real hardware. Display legibility,
+  touch, SD logging, live CAN decode, alarms, and the in-car soak are all still
+  deferred — no card, no live ECU, no eyes on the panel in daylight.
+- **The CAN decode is validated against one firmware build.** Every byte offset,
+  sign, and scale in `config.py` traces to the EFI Analytics "MegaSquirt CAN
+  realtime data broadcast protocol" note plus the author's own Microsquirt. There
+  is no committed `candump` fixture, so a build broadcasting a different layout
+  would decode wrong — a value off by exactly 10x is almost always this. See
+  [Troubleshooting](#troubleshooting).
+- **MS3 and other variants are untested.** They should work if they broadcast
+  Simplified Dash, but nobody has confirmed it. Even "worked unchanged" is a
+  useful report.
+- **RAM is tight** — about 16.5 KB free after startup on CircuitPython 10.2.1.
+  Two hardware-found bugs were both `MemoryError`s, one of them in the error
+  screen itself. Adding pages or full-screen bitmaps is not free; check the
+  `DEBUG = True` memory line before and after any UI change.
+- **The 2.4" FeatherWing must be V2.** V1 uses an STMPE610 touch controller this
+  code doesn't speak. The dash still runs without touch, just fixed on one page.
+- **Sunlight legibility is unverified.** The dim greys used for the page arrows
+  and inactive page dots were reviewed on a monitor, not on a panel in daylight.
+- **Datalogging flushes every row**, which briefly stalls the loop while a
+  session is active. Deliberate: a key-off should never cost more than one row.
+- **Peak / LO / HI / AVG readouts survive stale data** and clear only on a
+  touch-hold or a power cycle.
+
 ## Tests
 
 The pure logic - fixed-point formatting, tick rollover, CAN decode, the
@@ -283,29 +360,86 @@ python tests/run_tests.py        # -v for per-test names
 `tests/stubs.py` stands in for the CircuitPython-only modules (`board`,
 `canio`, `displayio`, ...); everything under test is the real dash code.
 
-Run it from `tests/`, not the repo root: CircuitPython requires the main file
-be named `code.py`, which shadows Python's standard-library `code` module for
-any tool that imports it (`pdb` does, so most linters and test runners do).
-`run_tests.py` handles this - it's why the suite has its own runner rather
-than a bare `python -m unittest`.
+Either the repo root or `tests/` works as a working directory. The suite ships
+its own runner rather than a bare `python -m unittest` for a specific reason:
+CircuitPython requires the main file be named `code.py`, which shadows Python's
+standard-library `code` module for any tool that imports it (`pdb` does, so most
+linters and test runners do). `run_tests.py` fixes up the path before importing
+anything, which is what makes both invocations safe.
+
+Every push runs this suite on Linux against Python 3.11/3.12/3.13
+([workflow](.github/workflows/tests.yml)).
 
 ## Repo structure
 
+Everything that goes on the device is in the repo root — the eight files listed
+under [Install](#install), and nothing else:
+
 ```
-code.py         thin main loop (construct subsystems, cycle updates)
-config.py       ALL tunables: CAN IDs/offsets, thresholds, colors, layout, timing
-canbus.py       canio setup w/ hardware ID filters, frame decode, EcuData store
-ui.py           displayio UI: pages, bars, markers, banners, render gating
-touch.py        TSC2007 polling + tap-zone state machine
-datalog.py      SD mount + engine-gated CSV session logger
-ticks.py        rollover-safe millisecond timing helpers
-boot.py         intentionally empty (see its comments for why)
-tests/          desktop test suite (no hardware needed) + CircuitPython stubs
-PERFORMANCE.md  architecture + optimization rationale
+code.py                  thin main loop (construct subsystems, cycle updates)
+config.py                ALL tunables: CAN IDs/offsets, thresholds, colors, layout, timing
+canbus.py                canio setup w/ hardware ID filters, frame decode, EcuData store
+ui.py                    displayio UI: pages, bars, markers, banners, render gating
+touch.py                 TSC2007 polling + tap-zone state machine
+datalog.py               SD mount + engine-gated CSV session logger
+ticks.py                 rollover-safe millisecond timing helpers
+boot.py                  intentionally empty (see its comments for why)
+```
+
+Everything else stays on your computer:
+
+```
+tests/                   desktop test suite (no hardware needed) + CircuitPython stubs
+.github/workflows/       CI: runs the suite on Python 3.11/3.12/3.13 every push
+.github/ISSUE_TEMPLATE/  bug report + MegaSquirt variant report forms
+README.md                this file
+CONTRIBUTING.md          development setup and conventions
+PERFORMANCE.md           architecture + optimization rationale
+BRINGUP.md               hardware bring-up checklist + bench results
+AUDIT-REPORT.md          full code audit: findings, and what stayed unverified
+THIRD-PARTY-NOTICES.md   dependency + licensing inventory
 ```
 
 (The original pre-refactor single-file version is preserved in git history at
 the `pre-refactor` tag.)
+
+## Documentation
+
+Four companion documents. None are required reading to *use* the dash:
+
+| Document | What it covers |
+|---|---|
+| [BRINGUP.md](BRINGUP.md) | Stage-by-stage hardware bring-up, from "before you plug anything in" through the in-car soak — plus the bench-run results and the two bugs they caught. **Start here for a new build.** |
+| [PERFORMANCE.md](PERFORMANCE.md) | Architecture and optimization rationale: the cooperative main loop, the fixed-point data model, GC discipline, measured loop rates. Read before changing the render path. |
+| [AUDIT-REPORT.md](AUDIT-REPORT.md) | Full code audit — 18 findings, what was verified, and (more usefully) what could *not* be verified, each paired with the evidence that would settle it. |
+| [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | Dependency and licensing inventory, including an AI-generated-code disclosure. |
+
+## Contributing
+
+Forks and adaptations are the point — see [Why this exists](#why-this-exists).
+Issues and pull requests are both welcome, and "I built one and it worked" is a
+genuinely useful report for a project with one known install.
+
+Most valuable contributions right now, roughly in order:
+
+1. **A `candump` capture** of IDs 1512–1515 from a running engine, alongside the
+   same values as TunerStudio displays them. This is the single biggest open gap
+   in the project: it would turn the decode table from *validated on one car*
+   into a committed test fixture. See [Known limitations](#known-limitations).
+2. **Confirmation on other MegaSquirt variants** — MS3, other firmware builds,
+   non-default broadcast base IDs.
+3. **Photos of the panel in daylight**, the only way to settle the legibility
+   questions the audit left open.
+4. **Bug reports from a moving car**, especially anything involving the `FLT n`
+   counter or the barometric lock.
+
+Logic changes should come with a test — the suite runs on desktop Python with no
+hardware and no dependencies (see [Tests](#tests)). Please keep `config.py` as
+the single home for tunables; that separation is what makes this forkable.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the practical detail: development setup,
+what the tests can and can't catch, and the conventions worth knowing before
+touching the main loop or the render path.
 
 ## License
 
