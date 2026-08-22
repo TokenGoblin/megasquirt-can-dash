@@ -1,0 +1,55 @@
+name: MegaSquirt variant report
+description: You ran this on something other than a Microsquirt — worked or not, both are useful
+labels: ["variant-report"]
+title: "[variant] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most valuable kind of report this project can get. The CAN
+        decode table has only ever been validated against **one** Microsquirt, so
+        every confirmation on other hardware — including "it just worked" — turns
+        a guess into a known fact.
+
+  - type: input
+    id: ecu
+    attributes:
+      label: ECU variant and firmware
+      placeholder: MS3 1.5.2 / MS2 3.4.3 / Microsquirt ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Worked unchanged
+        - Worked after changing config.py
+        - Some channels wrong
+        - Did not work
+    validations:
+      required: true
+
+  - type: textarea
+    id: changes
+    attributes:
+      label: What you had to change
+      description: Byte offsets, scales, base ID, baud rate — anything that differed.
+      render: python
+
+  - type: textarea
+    id: candump
+    attributes:
+      label: candump capture (the gold standard)
+      description: >
+        If you can: a capture of IDs 1512–1515 from a running engine, alongside
+        the same values as TunerStudio displays them. This is what would let the
+        decode table become a committed test fixture.
+      render: text
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Photos of the panel in daylight are especially welcome — legibility is still unverified.

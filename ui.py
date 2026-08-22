@@ -9,7 +9,8 @@
 #  Talks to:  ILI9341 TFT over SPI (via displayio/fourwire), fed by the
 #             shared EcuData store from canbus.py.
 #  Fits in:   code.py constructs DashUI once, then calls change_page() on
-#             touch events and update(ecu, now, bus_ok, log_state) per loop.
+#             touch events and update(ecu, now, bus_ok, log_state, baro_x10,
+#             baro_locked) per loop.
 #
 #  Rendering strategy (the performance-critical decisions, in one place):
 #    * display.auto_refresh = False + display.refresh() on our own tick -
@@ -26,9 +27,16 @@
 #    * Page switching only flips .hidden flags on prebuilt Groups and
 #      resets the shared-label caches. Hidden widgets keep their contents,
 #      so returning to a page repaints only what changed while it was away.
+#
+#  Alarms are the one thing here that deliberately ignores the current page:
+#  alarm_param() scans EVERY channel on every render tick, because a coolant
+#  temperature going critical on page 4 has to be visible from page 1. It is
+#  reported three ways on purpose - a banner naming the channel and value, a
+#  "!" on the reading, and a blink - so that none of it depends on being able
+#  to distinguish red from green.
 # ============================================================================
 
-import time
+import gc
 
 import board
 import displayio
@@ -117,6 +125,68 @@ def param_color(param, v_x10):
     return gradient_color(v_x10 / 10.0, _STOPS_BY_PARAM[param])
 
 
+# ==== ALARMS ================================================================
+# Alarm limits as x10 ints (None = no limit that side), converted once so the
+# per-tick scan across all eight channels is integer compares only.
+_ALARM_LO_X10 = tuple(
+    None if lo is None else int(lo * 10) for lo, _ in config.ALARMS)
+_ALARM_HI_X10 = tuple(
+    None if hi is None else int(hi * 10) for _, hi in config.ALARMS)
+_ENGINE_RUNNING_X10 = config.ENGINE_RUNNING_RPM * 10
+
+
+def alarm_param(ecu, now):
+    """Index of the channel currently in alarm, or -1 if none.
+
+    Scans EVERY channel, not just the one on screen - the whole point is that
+    a coolant temperature going critical on page 4 has to be visible from
+    page 1. Priority order is config.ALARM_PRIORITY, most consequential
+    first. Stale channels never alarm (they already show "---" and raise the
+    NO CAN banner), and with ALARM_ONLY_WHEN_RUNNING the whole scan is
+    skipped unless the engine is turning, because a cold wideband and a
+    cranking voltage dip are not emergencies.
+    """
+    if config.ALARM_ONLY_WHEN_RUNNING:
+        if ecu.is_stale(config.PARAM_RPM, now):
+            return -1
+        if ecu.value_x10[config.PARAM_RPM] <= _ENGINE_RUNNING_X10:
+            return -1
+    for param in config.ALARM_PRIORITY:
+        if ecu.is_stale(param, now):
+            continue
+        v = ecu.value_x10[param]
+        lo = _ALARM_LO_X10[param]
+        if lo is not None and v <= lo:
+            return param
+        hi = _ALARM_HI_X10[param]
+        if hi is not None and v >= hi:
+            return param
+    return -1
+
+
+def _value_text(param, v_x10, in_alarm):
+    """Formatted value, with a trailing "!" while the channel is in alarm.
+
+    The "!" is the non-color half of the alarm: color alone is invisible to
+    red/green color deficiency and washes out in direct sun, and unlike the
+    blinking banner it is still there in a glance or a photograph.
+    """
+    text = format_x10(v_x10, config.PAGES[param][2])
+    return text + "!" if in_alarm else text
+
+
+def _name_with_units(param):
+    """Channel name plus its unit, for the pages that have no units line.
+
+    Skips the unit when the name already carries it, so AFR reads "AFR 1"
+    rather than "AFR 1 AFR" and RPM stays "RPM".
+    """
+    name, units, _ = config.PAGES[param]
+    if units.upper() in name.upper():
+        return name
+    return name + " " + units
+
+
 # ==== SHARED GEOMETRY (derived once from config) ============================
 
 # Continuous bars share the round-LED bar's vertical slot so every page's
@@ -133,6 +203,14 @@ _MARKER_AVG = 1    # orange line at the running average, its own TileGrid
 # compare equal to that - suppressing the very first "PEAK ---" paint (a bug
 # caught on the bench: the peak line never appeared with no CAN attached).
 _UNSET = object()
+
+# Scale factor for the fatal screen's background: a bitmap this many times
+# smaller in each axis, drawn inside a scaled Group, covers the whole panel
+# for a fraction of the memory (see show_fatal). Falls back to 1 if it
+# wouldn't divide the screen exactly.
+_FATAL_BG_SCALE = (
+    8 if (config.SCREEN_W % 8 == 0 and config.SCREEN_H % 8 == 0) else 1
+)
 
 
 def _make_label(font_scale, color, anchor, position, text=""):
@@ -417,10 +495,14 @@ class _SegmentBar:
         self.group = displayio.Group()
         self._palettes = []
         self._cache = [None] * n     # last color int written per bulb
-        # Lit color per bulb index is a constant: color at that bulb's RPM.
+        # Lit color per bulb index is a constant: the color at the RPM where
+        # that bulb LIGHTS, which is (i+1)/n of full scale - bulb i turns on
+        # once rpm*n//max exceeds i. Using i/n instead would color every bulb
+        # for the segment below it, leaving the top bulb short of full red at
+        # redline - which is the one moment a shift light has a job to do.
         span = float(config.SHIFT_BAR_MAX_RPM)
         self._lit_colors = tuple(
-            gradient_color(i * (span / n), config.RPM_STOPS) for i in range(n)
+            gradient_color((i + 1) * (span / n), config.RPM_STOPS) for i in range(n)
         )
 
         total_w = n * config.BAR_SEGMENT_W + (n - 1) * config.BAR_GAP
@@ -491,10 +573,11 @@ class _Overview:
         self._value_labels = []
         self._c_key = [None] * len(config.GRID_PARAMS)    # (stale, v_x10)
         self._c_color = [None] * len(config.GRID_PARAMS)
+        self._c_alarm = [None] * len(config.GRID_PARAMS)
         for i, param in enumerate(config.GRID_PARAMS):
             self.group.append(_make_label(
                 config.GRID_NAME_SCALE, config.COLOR_UNITS,
-                (0.5, 0.5), config.GRID_NAME_POS[i], text=config.PAGES[param][0],
+                (0.5, 0.5), config.GRID_NAME_POS[i], text=_name_with_units(param),
             ))
             lbl = _make_label(
                 config.GRID_VALUE_SCALE, config.COLOR_VALUE,
@@ -505,21 +588,23 @@ class _Overview:
         self.group.hidden = True
         root.append(self.group)
 
-    def update(self, ecu, now):
-        """Refresh any cell whose value or staleness changed."""
+    def update(self, ecu, now, alarm):
+        """Refresh any cell whose value, staleness, or alarm state changed."""
         for i, param in enumerate(config.GRID_PARAMS):
             stale = ecu.is_stale(param, now)
             v = ecu.value_x10[param]
+            in_alarm = param == alarm
             key = -1000000 if stale else v   # single int cache key
-            if key == self._c_key[i]:
+            if key == self._c_key[i] and in_alarm == self._c_alarm[i]:
                 continue
             self._c_key[i] = key
+            self._c_alarm[i] = in_alarm
             lbl = self._value_labels[i]
             if stale:
                 text = "---"
                 color = config.COLOR_VALUE_STALE
             else:
-                text = format_x10(v, config.PAGES[param][2])
+                text = _value_text(param, v, in_alarm)
                 color = param_color(param, v)
             if lbl.text != text:
                 lbl.text = text
@@ -536,19 +621,29 @@ class _BeamGauge:
 
     def __init__(self, group, param, name, text_y, bar_y, vmin, vmax):
         self.param = param
+        left_x = (config.SCREEN_W - config.BEAM_BAR_W) // 2
         group.append(_make_label(
             config.BEAM_LABEL_SCALE, config.COLOR_UNITS,
-            (0.0, 0.5), ((config.SCREEN_W - config.BEAM_BAR_W) // 2, text_y), text=name,
+            (0.0, 0.5), (left_x, text_y), text=name,
         ))
+        # Unit in its own small label just past the name, rather than inside
+        # it: at the label's own scale a wide value like "-14.7" reaches far
+        # enough left to collide with "BOOST PSI", and a page whose whole
+        # purpose is a fast glance must not have its readout overlapped.
+        units = config.PAGES[param][1]
+        if units.upper() not in name.upper():
+            group.append(_make_label(
+                1, config.COLOR_UNITS, (0.0, 0.5),
+                (left_x + len(name) * 6 * config.BEAM_LABEL_SCALE + 6, text_y),
+                text=units,
+            ))
         self.value_label = _make_label(
             config.BEAM_VALUE_SCALE, config.COLOR_VALUE,
-            (1.0, 0.5),
-            ((config.SCREEN_W - config.BEAM_BAR_W) // 2 + config.BEAM_BAR_W, text_y),
+            (1.0, 0.5), (left_x + config.BEAM_BAR_W, text_y),
         )
         group.append(self.value_label)
         self.bitmap, self.palette = _bordered_fill_bar(
-            group, (config.SCREEN_W - config.BEAM_BAR_W) // 2, bar_y,
-            config.BEAM_BAR_W, config.BEAM_BAR_H,
+            group, left_x, bar_y, config.BEAM_BAR_W, config.BEAM_BAR_H,
         )
         self._min_x10 = int(vmin * 10)
         self._span_x10 = int(vmax * 10) - self._min_x10
@@ -557,6 +652,7 @@ class _BeamGauge:
         self._c_fill = None
         self._c_mark = None
         self._c_lbl_color = None
+        self._c_alarm = None
 
     def _px(self, v_x10, w):
         px = (v_x10 - self._min_x10) * w // self._span_x10
@@ -566,17 +662,19 @@ class _BeamGauge:
             return w
         return px
 
-    def update(self, ecu, now):
+    def update(self, ecu, now, alarm):
         w = config.BEAM_BAR_W
         h = config.BEAM_BAR_H
         stale = ecu.is_stale(self.param, now)
         v = ecu.value_x10[self.param]
+        in_alarm = self.param == alarm
         key = -1000000 if stale else v
 
         # Value text + its color (red when stale).
-        if key != self._c_key:
+        if key != self._c_key or in_alarm != self._c_alarm:
             self._c_key = key
-            text = "---" if stale else format_x10(v, config.PAGES[self.param][2])
+            self._c_alarm = in_alarm
+            text = "---" if stale else _value_text(self.param, v, in_alarm)
             if self.value_label.text != text:
                 self.value_label.text = text
             lbl_color = config.COLOR_VALUE_STALE if stale else config.COLOR_VALUE
@@ -616,9 +714,9 @@ class _BeamGauge:
 class DashUI:
     """The whole screen. Construct once; then only change_page() + update().
 
-    Construction shows the boot splash (the one place time.sleep() is used -
-    the main loop hasn't started yet), then builds every page's widgets into
-    one persistent root Group. Nothing is constructed after __init__.
+    Construction builds every page's widgets into one persistent root Group.
+    Nothing is constructed after __init__, and nothing here blocks: there is
+    no time.sleep() anywhere in this project.
     """
 
     def __init__(self):
@@ -635,8 +733,6 @@ class DashUI:
         )
         # Manual refresh from here on: WE decide when SPI traffic happens.
         self.display.auto_refresh = False
-
-        self._show_splash()
 
         # ---- build all static chrome + dynamic widgets, once --------------
         root = displayio.Group()
@@ -659,6 +755,11 @@ class DashUI:
         self.peak_label = _make_label(
             config.PEAK_SCALE, config.COLOR_PEAK, (0.5, 0.5), (cx, config.PEAK_CENTER_Y))
         root.append(self.peak_label)
+        # Barometric reference readout - Boost page only (see update()).
+        self.baro_label = _make_label(
+            1, config.COLOR_DOT_INACTIVE, (0.5, 0.5), (cx, config.BARO_CENTER_Y))
+        self.baro_label.hidden = True
+        root.append(self.baro_label)
         # NO CAN banner (top-right) + datalog state (top-left).
         self.warning_label = _make_label(
             1, config.COLOR_WARNING, (1.0, 0.0), (config.SCREEN_W - 4, 4))
@@ -666,6 +767,18 @@ class DashUI:
         self.datalog_label = _make_label(
             1, config.COLOR_DOT_INACTIVE, (0.0, 0.0), (4, 4))
         root.append(self.datalog_label)
+        # Touch-controller status, just right of the datalog corner. Only ever
+        # says anything when the panel is dead, in which case the user is
+        # otherwise left tapping a screen that ignores them.
+        self.touch_label = _make_label(
+            1, config.COLOR_WARNING, (0.0, 0.0), (50, 4))
+        root.append(self.touch_label)
+        # Loop-fault counter, top center - clear of the datalog corner (left)
+        # and the NO CAN corner (right). Empty unless code.py's loop has
+        # caught and survived an exception; see note_fault().
+        self.fault_label = _make_label(
+            1, config.COLOR_WARNING, (0.5, 0.0), (cx, 4))
+        root.append(self.fault_label)
         # Dim tap-zone hints.
         root.append(_make_label(
             config.ARROW_SCALE, config.COLOR_ARROW, (0.0, 0.5),
@@ -735,46 +848,100 @@ class DashUI:
         self._c_value_key = None    # (stale?) raw int key for the big number
         self._c_value_text = None
         self._c_value_color = None
+        self._c_value_alarm = None  # alarm state the big number was drawn with
         self._c_peak_a = _UNSET     # peak/lo/avg caches (may hold None = "no
         self._c_peak_b = _UNSET     # data yet", hence the _UNSET sentinel)
-        self._c_banner = None       # bool: banner currently shown
+        self._c_banner = None       # last banner string shown
+        self._c_banner_hidden = None    # blink phase currently applied
         self._c_log_state = None    # datalog indicator cache
         self._c_baro = None         # last baro_x10 applied to the MAP stops
+        self._c_baro_locked = None  # last lock state shown on the Boost page
 
-    # ---- boot splash --------------------------------------------------------
+    # ---- one-shot status from subsystems ----------------------------------
 
-    def _show_splash(self):
-        """Show /splash.bmp for the configured time; silently skip if absent.
-        Startup-only blocking (time.sleep) - the main loop hasn't begun."""
-        try:
-            bmp = displayio.OnDiskBitmap(config.SPLASH_IMAGE_PATH)
-            grp = displayio.Group()
-            grp.append(displayio.TileGrid(bmp, pixel_shader=bmp.pixel_shader))
-            self.display.root_group = grp
+    def set_touch_available(self, available):
+        """Record whether tap navigation works. Called once at startup - it's
+        a fact about the hardware, not a per-tick reading, so it stays out of
+        update()'s argument list."""
+        self.touch_label.text = "" if available else "NO TOUCH"
+
+    # ---- loop fault indicator ---------------------------------------------
+
+    def note_fault(self, count):
+        """Show `count` in the top-center FLT indicator.
+
+        Called from code.py's loop handler after an exception was caught and
+        survived. Refreshes the panel itself rather than waiting for the next
+        render tick, because the render tick is one of the things that might
+        be failing - if update() is what raised, this is the only way the
+        indicator ever reaches the glass. Change-gated like everything else,
+        so a fault that repeats at the same count costs nothing.
+        """
+        text = "FLT {}".format(count)
+        if self.fault_label.text != text:
+            self.fault_label.text = text
             self.display.refresh(minimum_frames_per_second=0)
-            time.sleep(config.SPLASH_DURATION_S)
-        except OSError as e:
-            print("Splash image not found/failed to load:", e)
+
+    def clear_fault(self):
+        """Clear the FLT indicator after a quiet period (config.FAULT_CLEAR_MS)."""
+        if self.fault_label.text:
+            self.fault_label.text = ""
 
     # ---- fatal error screen ---------------------------------------------------
 
     def show_fatal(self, message):
         """Full red screen + message, then halt forever. For unrecoverable
-        startup failures (e.g. CAN peripheral init) where the dash is
-        useless anyway. Never returns."""
-        err_bmp = displayio.Bitmap(config.SCREEN_W, config.SCREEN_H, 1)
-        err_pal = displayio.Palette(1)
-        err_pal[0] = 0xFF0000
-        grp = displayio.Group()
-        grp.append(displayio.TileGrid(err_bmp, pixel_shader=err_pal, x=0, y=0))
-        grp.append(_make_label(
-            2, 0xFFFFFF, (0.5, 0.5),
-            (config.SCREEN_W // 2, config.SCREEN_H // 2), text=message))
-        self.display.root_group = grp
-        self.display.refresh(minimum_frames_per_second=0)
+        failures (CAN init, a bad config, a loop failing continuously) where
+        the dash is useless anyway. Never returns.
+
+        This function must be able to run when there is almost no memory
+        left. It used to build the red background as a full-screen 240x320
+        Bitmap - about 9.6 KB - and on the bench it did exactly what you would
+        fear: died with a MemoryError while trying to report a fault, leaving
+        a traceback on the serial console and a dead panel. An error screen
+        that needs memory in order to appear is not an error screen.
+
+        So: drop the dash's own widget tree first, then paint the background
+        with a tenth-scale bitmap in a scaled Group - visually identical, ~150
+        bytes instead of ~9,600.
+        """
+        self._draw_fatal(message)
         print(message)
         while True:
             pass
+
+    def _draw_fatal(self, message):
+        """Paint the fatal screen. Split out of show_fatal so it can be
+        tested - show_fatal itself never returns."""
+        # Release the live UI before allocating anything at all. Drop our own
+        # reference FIRST - that cannot fail, whereas everything after it can,
+        # and there is no point holding the widget tree hostage to a display
+        # that has already stopped answering.
+        self._root = None
+        try:
+            self.display.root_group = displayio.Group()
+            gc.collect()
+        except Exception:  # pylint: disable=broad-except
+            pass          # nothing here is worth failing the fatal screen over
+
+        try:
+            grp = displayio.Group()
+            bg = displayio.Group(scale=_FATAL_BG_SCALE)
+            bmp = displayio.Bitmap(config.SCREEN_W // _FATAL_BG_SCALE,
+                                   config.SCREEN_H // _FATAL_BG_SCALE, 1)
+            pal = displayio.Palette(1)
+            pal[0] = 0xFF0000
+            bg.append(displayio.TileGrid(bmp, pixel_shader=pal, x=0, y=0))
+            grp.append(bg)
+            grp.append(_make_label(
+                2, 0xFFFFFF, (0.5, 0.5),
+                (config.SCREEN_W // 2, config.SCREEN_H // 2), text=message))
+            self.display.root_group = grp
+            self.display.refresh(minimum_frames_per_second=0)
+        except Exception as e:  # pylint: disable=broad-except
+            # Even this failed. The serial console is all that is left, and
+            # halting quietly still beats an exception storm.
+            print("fatal screen could not be drawn:", e)
 
     # ---- page navigation --------------------------------------------------------
 
@@ -796,6 +963,9 @@ class DashUI:
         self.value_label.hidden = is_special
         self.units_label.hidden = is_special
         self.peak_label.hidden = is_special
+        # Boost is the only reading derived from the baro reference, so it is
+        # the only page that shows it.
+        self.baro_label.hidden = page != config.PARAM_BOOST
         if not is_special:
             self.units_label.text = config.PAGES[page][1]
 
@@ -816,18 +986,16 @@ class DashUI:
         self._c_value_key = None
         self._c_value_text = None
         self._c_value_color = None
+        self._c_value_alarm = None
         self._c_peak_a = _UNSET
         self._c_peak_b = _UNSET
         self._c_banner = None
-        if is_special:
-            # Special pages show staleness per-cell; the corner banner is
-            # single-gauge-only, so clear it on entry.
-            self.warning_label.text = ""
+        self._c_banner_hidden = None
         self._page_dirty = False
 
     # ---- render tick ---------------------------------------------------------------
 
-    def update(self, ecu, now, bus_ok, log_state, baro_x10):
+    def update(self, ecu, now, bus_ok, log_state, baro_x10, baro_locked):
         """Render pass, self-gated to the UI tick (~20 Hz), ending in a
         manual display.refresh().
 
@@ -839,6 +1007,10 @@ class DashUI:
             log_state - datalog.STATE_* for the corner indicator.
             baro_x10  - CanBus.baro_ref_x10; recenters MAP's vacuum/boost
                         color boundary when it moves.
+            baro_locked - CanBus.baro_locked; False means baro_x10 is the
+                        sea-level fallback, not a measurement, and the Boost
+                        page says so rather than letting a guessed zero pass
+                        for a measured one.
         Between ticks this returns after one integer compare - the loop
         spends its time in CAN drain, not drawing.
         """
@@ -848,9 +1020,20 @@ class DashUI:
 
         # Follow the live baro reference (moves once at lock, then only in
         # 0.1 kPa steps while parked - int compare gates the float work).
-        if baro_x10 != self._c_baro:
+        if baro_x10 != self._c_baro or baro_locked != self._c_baro_locked:
+            if baro_x10 != self._c_baro:
+                set_map_baro(baro_x10 / 10.0)
             self._c_baro = baro_x10
-            set_map_baro(baro_x10 / 10.0)
+            self._c_baro_locked = baro_locked
+            # "BARO 84.2" once captured; "BARO 101.3 EST" while the dash is
+            # still running on the sea-level fallback (powered up mid-drive,
+            # or not enough engine-off frames yet to agree on a lock).
+            if baro_locked:
+                self.baro_label.text = "BARO " + format_x10(baro_x10, 1)
+                self.baro_label.color = config.COLOR_DOT_INACTIVE
+            else:
+                self.baro_label.text = "BARO " + format_x10(baro_x10, 1) + " EST"
+                self.baro_label.color = config.COLOR_PEAK
 
         if self._page_dirty:
             self._apply_page_chrome()
@@ -868,32 +1051,85 @@ class DashUI:
                 self.datalog_label.text = "LOG OFF"
                 self.datalog_label.color = config.COLOR_DOT_INACTIVE
 
+        # One alarm scan per tick, covering every channel, shared by the
+        # banner and by whichever page is drawing.
+        alarm = alarm_param(ecu, now)
         page = self._page
+        self._update_banner(ecu, now, bus_ok, page, alarm)
+
         if page == config.OVERVIEW_PAGE:
-            self._overview.update(ecu, now)
+            self._overview.update(ecu, now, alarm)
         elif page == config.BEAM_PAGE:
-            self._beam_boost.update(ecu, now)
-            self._beam_mat.update(ecu, now)
+            self._beam_boost.update(ecu, now, alarm)
+            self._beam_mat.update(ecu, now, alarm)
         else:
-            self._render_single_gauge(ecu, now, bus_ok, page)
+            self._render_single_gauge(ecu, now, page, alarm)
 
         # One SPI push per tick, covering every region dirtied above.
         self.display.refresh(minimum_frames_per_second=0)
 
-    def _render_single_gauge(self, ecu, now, bus_ok, page):
-        """Big number + peak line + NO CAN banner + this page's bar."""
+    def _all_stale(self, ecu, now):
+        """True when no channel at all is fresh - i.e. the bus is gone, not
+        just one frame."""
+        for param in range(config.NUM_PARAMS):
+            if not ecu.is_stale(param, now):
+                return False
+        return True
+
+    def _update_banner(self, ecu, now, bus_ok, page, alarm):
+        """Drive the top-right banner. Runs on EVERY page, unlike before.
+
+        Priority: a dead bus outranks an alarm, because an alarm derived from
+        data that stopped arriving is not information. Below that, an alarm
+        names its channel and value ("COOLANT 238") so the driver knows what
+        is wrong without hunting through ten pages, and blinks so it catches
+        the eye - while the "!" that _value_text adds stays steady.
+        """
+        if not bus_ok:
+            text = "NO CAN"
+        elif page < config.NUM_PARAMS and ecu.is_stale(page, now):
+            text = "NO CAN"          # this page's own channel is silent
+        elif self._all_stale(ecu, now):
+            text = "NO CAN"          # nothing is arriving at all
+        elif alarm >= 0:
+            text = config.PAGES[alarm][0] + " " + format_x10(
+                ecu.value_x10[alarm], config.PAGES[alarm][2])
+        else:
+            text = ""
+
+        if text != self._c_banner:
+            self.warning_label.text = text
+            self._c_banner = text
+            if self._c_banner_hidden:        # never leave it blinked out
+                self.warning_label.hidden = False
+                self._c_banner_hidden = False
+
+        # Blink only while alarming; a NO CAN banner holds steady.
+        if text and alarm >= 0 and bus_ok:
+            hidden = bool((now // config.ALARM_BLINK_MS) & 1)
+        else:
+            hidden = False
+        if hidden != self._c_banner_hidden:
+            self.warning_label.hidden = hidden
+            self._c_banner_hidden = hidden
+
+    def _render_single_gauge(self, ecu, now, page, alarm):
+        """Big number + peak line + this page's bar. (The banner is handled
+        for every page in _update_banner.)"""
         stale = ecu.is_stale(page, now)
         v = ecu.value_x10[page]
+        in_alarm = page == alarm
         key = -1000000 if stale else v
 
         # -- big value: format/recolor only when the raw int changed --------
-        if key != self._c_value_key:
+        if key != self._c_value_key or in_alarm != self._c_value_alarm:
             self._c_value_key = key
+            self._c_value_alarm = in_alarm
             if stale:
                 text = "---"
                 color = config.COLOR_VALUE_STALE
             else:
-                text = format_x10(v, config.PAGES[page][2])
+                text = _value_text(page, v, in_alarm)
                 color = param_color(page, v)
             if text != self._c_value_text:
                 self.value_label.text = text
@@ -922,13 +1158,6 @@ class DashUI:
                 self._c_peak_a = a
                 self.peak_label.text = "PEAK {}".format(
                     format_x10(a, config.PAGES[page][2]))
-
-        # -- NO CAN banner: this channel stale, or the controller itself in
-        #    a failed bus state (bus-off shows instantly, before timeouts) --
-        banner = stale or not bus_ok
-        if banner != self._c_banner:
-            self.warning_label.text = "NO CAN" if banner else ""
-            self._c_banner = banner
 
         # -- this page's bar graphic ----------------------------------------
         if page == config.PARAM_RPM:

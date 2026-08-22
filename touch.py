@@ -30,6 +30,24 @@ import ticks
 # ==== TOUCH STATE MACHINE STATES ============================================
 _IDLE = 0       # no finger down; watching for a press edge
 _TOUCHING = 1   # finger held; waiting for release before re-arming
+_REJECTED = 2   # contact too light to count; ignore until it lifts
+
+# Returned by update() when a press has been held for TOUCH_HOLD_MS: the
+# caller resets the peak/low/average statistics. Distinct from the -1/+1 page
+# steps, and never returned more than once per physical press.
+HOLD = 2
+
+# How many consecutive sub-threshold polls before a contact is written off as
+# too light (state -> _REJECTED, no further I2C reads until it lifts).
+#
+# Not zero, and not unlimited. Pressure ramps as a finger lands, so the first
+# poll of a perfectly good tap can read light - rejecting immediately would
+# drop real taps. But retrying forever means re-reading the driver's point
+# dict at the full 50 Hz poll rate for as long as anything rests on the panel,
+# which is the one per-loop allocation this module promises not to make. Five
+# polls is 100 ms: far longer than a finger takes to seat, far shorter than
+# anything resting there.
+_REJECT_POLLS = 5
 
 
 class TouchNav:
@@ -51,9 +69,20 @@ class TouchNav:
 
         self._state = _IDLE
         self._last_poll = ticks.ms()
+        self._light_polls = 0       # consecutive sub-threshold reads
+        self._press_start = 0       # tick of the current press, for the hold
+        self._hold_fired = False    # HOLD is reported once per press
         # Precompute the zone boundary once - screen x at or left of this is
         # "previous page".
         self._left_zone_max_x = int(config.SCREEN_W * config.TAP_ZONE_FRACTION)
+
+    @property
+    def available(self):
+        """False when the touch controller wasn't found, so the UI can say so
+        on the panel instead of leaving the user tapping a dead screen and
+        wondering (the only previous signal was a line on the serial console,
+        which needs a laptop to read)."""
+        return self._touch is not None
 
     def _raw_x_to_screen_x(self, raw_x):
         """Map a raw 12-bit panel X reading to a 0..SCREEN_W-1 pixel column.
@@ -77,10 +106,12 @@ class TouchNav:
         """Poll the panel if the 50 Hz tick has elapsed; classify any press.
 
         Parameters: now - this loop pass's ticks.ms() stamp.
-        Returns: -1 (left-zone tap), +1 (right-zone tap), or 0 (no event).
+        Returns: -1 (left-zone tap), +1 (right-zone tap), HOLD (press held
+        for TOUCH_HOLD_MS - reset the statistics), or 0 (no event).
         Timing: returns immediately (no I2C) between ticks; one boolean I2C
-        read per tick otherwise. Fires exactly once per physical press, on
-        the press edge.
+        read per tick otherwise. The page step fires exactly once per physical
+        press, on the press edge; HOLD fires at most once more, later in that
+        same press.
         """
         if self._touch is None:
             return 0
@@ -93,13 +124,27 @@ class TouchNav:
         # Boolean pressed/not-pressed read - the cheap, allocation-free poll.
         pressed = self._touch.touched
 
+        if self._state == _REJECTED:
+            if not pressed:
+                self._state = _IDLE
+                self._light_polls = 0
+            return 0                  # written off; no more point reads
+
         if self._state == _TOUCHING:
             if not pressed:
                 self._state = _IDLE   # finger lifted - re-arm for the next tap
+                return 0
+            # Still held: has it become a hold?
+            if not self._hold_fired and (
+                ticks.diff(now, self._press_start) >= config.TOUCH_HOLD_MS
+            ):
+                self._hold_fired = True
+                return HOLD
             return 0
 
         # _IDLE: look for a press edge.
         if not pressed:
+            self._light_polls = 0
             return 0
 
         # Press edge: NOW read the full point (the one dict allocation per
@@ -108,9 +153,17 @@ class TouchNav:
         # press than the driver's built-in minimum.
         point = self._touch.touch
         if point is None or point["pressure"] <= config.TOUCH_PRESSURE_THRESHOLD:
-            return 0   # too light to count; stay IDLE and let it retry
+            # Too light to count. Give a landing finger a few polls to seat,
+            # then stop reading the point until whatever it is lifts off.
+            self._light_polls += 1
+            if self._light_polls >= _REJECT_POLLS:
+                self._state = _REJECTED
+            return 0
 
+        self._light_polls = 0
         self._state = _TOUCHING
+        self._press_start = now
+        self._hold_fired = False
         sx = self._raw_x_to_screen_x(point["x"])
         if sx <= self._left_zone_max_x:
             return -1   # left half tapped -> previous page

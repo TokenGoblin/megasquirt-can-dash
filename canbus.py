@@ -61,6 +61,18 @@ _BARO_FALLBACK_X10 = int(config.BARO_FALLBACK_KPA * 10 + 0.5)
 _BARO_MIN_X10 = int(config.BARO_MIN_KPA * 10 + 0.5)
 _BARO_MAX_X10 = int(config.BARO_MAX_KPA * 10 + 0.5)
 _BARO_SHIFT = config.BARO_FILTER_SHIFT
+_BARO_LOCK_SAMPLES = config.BARO_LOCK_SAMPLES
+_BARO_LOCK_SPREAD_X10 = int(config.BARO_LOCK_SPREAD_KPA * 10 + 0.5)
+
+# Plausibility bounds, converted to x10 ints once so the gate on the hot
+# decode path is two integer compares. Same order as config.PARAM_*.
+_SANE_MIN_X10 = tuple(int(lo * 10) for lo, _ in config.SANE_RANGES)
+_SANE_MAX_X10 = tuple(int(hi * 10) for _, hi in config.SANE_RANGES)
+
+# Per-channel flags for the two statistics not every channel needs, so set()
+# tests a preindexed bool instead of searching a tuple.
+_TRACK_AVG = tuple(p in config.AVG_PARAMS for p in range(config.NUM_PARAMS))
+_TRACK_LOW = tuple(p in config.LOW_PARAMS for p in range(config.NUM_PARAMS))
 
 
 # ==== FIXED-POINT FORMATTING ================================================
@@ -114,19 +126,45 @@ class EcuData:
     def set(self, param, v_x10, now):
         """Store a fresh sample for `param` stamped at tick `now`.
 
-        Updates live value, freshness timestamp, peak, low, and average
-        accumulators in one pass. Integer-only; allocation-free.
+        Updates live value, freshness timestamp, peak, and (for the channels
+        that use them) low and average. Integer-only; allocation-free.
+
+        Returns True if the sample was stored, False if it was rejected as
+        implausible - this is the one gate on the CAN trust boundary, and it
+        sits here rather than in _decode() so that NOTHING can reach the
+        display, the statistics, or the log without passing it. Out-of-range
+        samples are dropped rather than clamped: dropping shows "---" once the
+        channel goes stale, while clamping would invent a believable number.
         """
+        if v_x10 < _SANE_MIN_X10[param] or v_x10 > _SANE_MAX_X10[param]:
+            return False
         self.value_x10[param] = v_x10
         self.updated[param] = now
         pk = self.peak_x10[param]
         if pk is None or v_x10 > pk:
             self.peak_x10[param] = v_x10
-        lo = self.low_x10[param]
-        if lo is None or v_x10 < lo:
-            self.low_x10[param] = v_x10
-        self.avg_sum[param] += v_x10
-        self.avg_count[param] += 1
+        if _TRACK_LOW[param]:
+            lo = self.low_x10[param]
+            if lo is None or v_x10 < lo:
+                self.low_x10[param] = v_x10
+        if _TRACK_AVG[param]:
+            self.avg_sum[param] += v_x10
+            self.avg_count[param] += 1
+        return True
+
+    def reset_stats(self):
+        """Clear every peak / low / average back to "no data yet".
+
+        Peaks are for a whole power-on session by design, but until now the
+        only way to clear one was a power cycle - which also ends the datalog
+        session. touch.py's hold gesture calls this. The readouts snapping
+        back to "PEAK ---" is the confirmation, so no extra UI is needed.
+        """
+        for param in range(config.NUM_PARAMS):
+            self.peak_x10[param] = None
+            self.low_x10[param] = None
+            self.avg_sum[param] = 0
+            self.avg_count[param] = 0
 
     def is_stale(self, param, now):
         """True if `param` has never updated or hasn't within the stale
@@ -174,10 +212,33 @@ class CanBus:
         # auto_restart=True lets the controller recover from bus-off (e.g. a
         # transient wiring short) by itself instead of staying dead until a
         # power cycle - the stale-data UI covers the gap meanwhile.
-        self._can = canio.CAN(
-            tx=board.CAN_TX, rx=board.CAN_RX,
-            baudrate=config.CAN_BAUD_RATE, auto_restart=True,
-        )
+        # silent=True makes this a pure bus monitor that cannot transmit at
+        # all - see config.CAN_SILENT_MODE for why that is NOT automatically
+        # the safer choice on a two-node bus.
+        #
+        # The `silent` keyword is documented, but canio is a port-specific
+        # module and older builds may not accept it. If it's missing we fall
+        # back to a plain open - EXCEPT when silent mode was actually asked
+        # for, because quietly handing back a transmitting controller to
+        # someone who asked for a silent one is the worst kind of failure:
+        # the setting reads as honoured and the bus gets talked to anyway.
+        # Refuse loudly instead; code.py turns that into the fatal screen.
+        try:
+            self._can = canio.CAN(
+                tx=board.CAN_TX, rx=board.CAN_RX,
+                baudrate=config.CAN_BAUD_RATE, auto_restart=True,
+                silent=config.CAN_SILENT_MODE,
+            )
+        except TypeError:
+            if config.CAN_SILENT_MODE:
+                print("CAN_SILENT_MODE is set, but this CircuitPython build's "
+                      "canio.CAN() has no 'silent' parameter. Refusing to open "
+                      "a transmitting controller you asked to keep quiet.")
+                raise
+            self._can = canio.CAN(
+                tx=board.CAN_TX, rx=board.CAN_RX,
+                baudrate=config.CAN_BAUD_RATE, auto_restart=True,
+            )
 
         # One exact-ID hardware filter per dash frame: the SAME51 accepts
         # ONLY these four IDs into its receive FIFO, so Python never spends a
@@ -193,10 +254,20 @@ class CanBus:
         # empty) - the non-blocking contract the main loop depends on.
         self._listener = self._can.listen(matches=matches, timeout=0)
 
-        # Barometric reference, x10 kPa. With an override configured this is
-        # pinned for the whole run; otherwise it starts unlocked (None) and
-        # is captured/tracked from engine-off MAP frames in _decode().
+        self._init_baro_state()
+
+    def _init_baro_state(self):
+        """Reset the barometric reference and its lock-consensus counters.
+
+        With an override configured the reference is pinned for the whole
+        run; otherwise it starts unlocked (None) and is captured/tracked from
+        engine-off MAP frames in _decode(). Split out of __init__ so the
+        capture logic can be exercised without a CAN peripheral.
+        """
         self._baro_x10 = _BARO_OVERRIDE_X10
+        self._lock_ref_x10 = None   # first sample of the current agreeing run
+        self._lock_sum = 0          # sum of that run, for the locked mean
+        self._lock_count = 0        # length of that run
 
     @property
     def baro_ref_x10(self):
@@ -206,6 +277,14 @@ class CanBus:
         sea-level fallback until the first valid capture."""
         b = self._baro_x10
         return _BARO_FALLBACK_X10 if b is None else b
+
+    @property
+    def baro_locked(self):
+        """True once the reference is trustworthy - either pinned by
+        ATMOSPHERIC_KPA_OVERRIDE or captured from engine-off MAP. False while
+        the sea-level fallback is standing in, which ui.py marks on the Boost
+        page so a wrong zero can't masquerade as a measured one."""
+        return self._baro_x10 is not None
 
     @property
     def bus_ok(self):
@@ -253,7 +332,7 @@ class CanBus:
             # base+0: MAP kPa*10 | RPM | CLT degF*10 | TPS %*10 - one unpack
             # for all four words.
             map_x10, rpm, clt_x10, tps_x10 = struct.unpack(_FMT_DASH0, data)
-            ecu.set(config.PARAM_MAP, map_x10, now)
+            map_ok = ecu.set(config.PARAM_MAP, map_x10, now)
             # RPM arrives x1; store x10 like everything else so formatting
             # and change-detection stay uniform (70000 is still a small int).
             ecu.set(config.PARAM_RPM, rpm * 10, now)
@@ -262,33 +341,66 @@ class CanBus:
 
             # Baro capture: engine-off MAP *is* local barometric pressure.
             # Gated on RPM == 0 (same frame - can never mistake idle vacuum
-            # for atmosphere) plus a plausibility window (rejects garbage
-            # frames from a booting ECU). First qualifying frame locks the
-            # reference exactly; later engine-off frames low-pass toward MAP
-            # so a stop at a different altitude quietly recalibrates. Frozen
-            # whenever the engine runs. Integer-only, allocation-free.
-            if _BARO_OVERRIDE_X10 is None and rpm == 0 and (
-                _BARO_MIN_X10 <= map_x10 <= _BARO_MAX_X10
-            ):
-                b = self._baro_x10
-                if b is None:
-                    self._baro_x10 = map_x10
-                elif b != map_x10:
-                    step = (map_x10 - b) >> _BARO_SHIFT
-                    if step == 0 and map_x10 > b:
-                        step = 1  # floor-shift stalls on small +deltas; nudge
-                    self._baro_x10 = b + step
+            # for atmosphere) plus a plausibility window. The INITIAL lock
+            # additionally needs BARO_LOCK_SAMPLES consecutive frames that
+            # agree within BARO_LOCK_SPREAD_KPA, and locks their mean: the
+            # window alone is 55 kPa wide, so one corrupt frame would
+            # otherwise become a frozen, invisible offset on every boost
+            # reading for the rest of the drive. Once locked, later
+            # engine-off frames low-pass toward MAP so a stop at a different
+            # altitude quietly recalibrates. Frozen whenever the engine runs.
+            # Integer-only, allocation-free.
+            if _BARO_OVERRIDE_X10 is None:
+                if rpm == 0 and _BARO_MIN_X10 <= map_x10 <= _BARO_MAX_X10:
+                    b = self._baro_x10
+                    if b is None:
+                        ref = self._lock_ref_x10
+                        if ref is None or abs(map_x10 - ref) > _BARO_LOCK_SPREAD_X10:
+                            # Disagrees with the run so far - start over from
+                            # this sample.
+                            self._lock_ref_x10 = map_x10
+                            self._lock_sum = map_x10
+                            self._lock_count = 1
+                        else:
+                            self._lock_sum += map_x10
+                            self._lock_count += 1
+                        # Tested outside the branch above so that a run of one
+                        # counts: BARO_LOCK_SAMPLES = 1 has to mean "lock on
+                        # the first frame", not "on the second".
+                        if self._lock_count >= _BARO_LOCK_SAMPLES:
+                            self._baro_x10 = (
+                                (self._lock_sum + self._lock_count // 2)
+                                // self._lock_count
+                            )
+                            self._lock_ref_x10 = None
+                            self._lock_sum = 0
+                            self._lock_count = 0
+                    elif b != map_x10:
+                        step = (map_x10 - b) >> _BARO_SHIFT
+                        if step == 0 and map_x10 > b:
+                            step = 1  # floor-shift stalls on small +deltas; nudge
+                        self._baro_x10 = b + step
+                elif self._baro_x10 is None and self._lock_count:
+                    # Engine turned over (or an implausible frame arrived)
+                    # before the run completed: "consecutive" means what it
+                    # says, so discard the partial run.
+                    self._lock_ref_x10 = None
+                    self._lock_sum = 0
+                    self._lock_count = 0
 
             # Boost is derived from MAP (gauge pressure above the baro
             # reference, in PSI) and stamped with the same tick so it goes
             # stale exactly when MAP does. Round-half-away-from-zero to the
-            # nearest 0.1 PSI.
-            ref = self._baro_x10
-            if ref is None:
-                ref = _BARO_FALLBACK_X10
-            b = (map_x10 - ref) * _PSI_PER_KPA
-            ecu.set(config.PARAM_BOOST,
-                    int(b + 0.5) if b >= 0 else int(b - 0.5), now)
+            # nearest 0.1 PSI. Skipped entirely when the MAP sample was
+            # rejected as implausible - deriving a reading from a value we
+            # just refused to display would smuggle it back in.
+            if map_ok:
+                ref = self._baro_x10
+                if ref is None:
+                    ref = _BARO_FALLBACK_X10
+                b = (map_x10 - ref) * _PSI_PER_KPA
+                ecu.set(config.PARAM_BOOST,
+                        int(b + 0.5) if b >= 0 else int(b - 0.5), now)
 
         elif msg_id == _ID_DASH1:
             # base+1: MAT degF*10 is the third word (offset 4); words 0/1 are
