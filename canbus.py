@@ -198,6 +198,10 @@ class CanBus:
         # is captured/tracked from engine-off MAP frames in _decode().
         self._baro_x10 = _BARO_OVERRIDE_X10
 
+        # ticks.ms() of the most recently received dash frame (None = never).
+        # Drives the NeoPixel activity light in statusled.py.
+        self.last_rx = None
+
     @property
     def baro_ref_x10(self):
         """Current barometric reference (kPa * 10 int) used for the Boost
@@ -235,6 +239,7 @@ class CanBus:
             if msg is None:
                 return                      # FIFO empty - done this pass
             remaining -= 1
+            self.last_rx = now
             data = getattr(msg, "data", None)
             if data is None or len(data) < 8:
                 continue                    # RTR frame / runt - no payload to decode

@@ -410,3 +410,59 @@ LOG_DIR = "/sd/logs"
 # RPM rises past this and stops when it falls back below. 300 sits safely
 # between cranking and the lowest realistic idle.
 ENGINE_RUNNING_RPM = 300
+
+# ==== STATUS LED (onboard NeoPixel, CAN link/activity) ======================
+# The Feather's NeoPixel acts like an Ethernet port's link light: it flickers
+# while MegaSquirt frames are arriving, slowly breathes blue -> purple while
+# the bus is quiet, adds a yellow strobe double-flash while a datalog is being
+# written, and glows solid LED_ERROR_COLOR while the CAN controller is
+# error-passive or bus-off (miswired / unterminated bus). See statusled.py.
+
+# Master switch. False leaves the pixel dark and costs nothing per loop.
+LED_ENABLED = True
+
+# How often the LED pattern is re-evaluated, milliseconds (> 0). Sets timing
+# resolution only (every pattern is computed from the clock); 10 ms is fine
+# enough for the strobe flashes and costs nothing noticeable.
+LED_TICK_MS = 10
+
+# Activity flicker half-period, milliseconds (> 0). While traffic is present
+# the pixel alternates on/off every LED_BLINK_MS, so 40 ms = 12.5 Hz flicker -
+# the classic link-light look. Larger = slower, calmer blink.
+LED_BLINK_MS = 40
+
+# How long after the last received frame the LED keeps flickering,
+# milliseconds (> 0). A little above the broadcast interval so a steady
+# stream reads as continuous activity rather than stuttering.
+LED_ACTIVITY_MS = 150
+
+# Activity-flicker and error colors (0xRRGGBB) and their brightness
+# (0.0-1.0). The pixel is very bright at full scale; 0.01 is clearly visible
+# on the bench. The floor is ~0.004 - anything lower rounds every channel
+# to 0 (off).
+LED_ACTIVITY_COLOR = 0x00FF00
+LED_ERROR_COLOR = 0xFF0000
+LED_BRIGHTNESS = 0.01
+
+# Idle "breathing" while no frames are arriving (bus healthy but quiet - e.g.
+# ECU off or CAN unplugged): brightness ramps 0 -> LED_IDLE_MAX_BRIGHTNESS
+# -> 0 once per LED_IDLE_BREATHE_MS, while the color slides from
+# LED_IDLE_COLOR_A (at the dim end) to LED_IDLE_COLOR_B (at the peak) and
+# back. At 0.05 the pixel only has ~12 steps, so the fade is slightly
+# stepped near dark.
+LED_IDLE_COLOR_A = 0x0000FF   # blue
+LED_IDLE_COLOR_B = 0x8000FF   # purple
+LED_IDLE_MAX_BRIGHTNESS = 0.05
+LED_IDLE_BREATHE_MS = 4000    # one full breath (in + out), > 0
+
+# Datalogging strobe: while a log session is writing to the SD card, an
+# aircraft-strobe-style double flash (flash, gap, flash, then the normal
+# pattern until the next cycle) is laid over the activity flicker / idle
+# breathing. Bus errors
+# still override it with solid red. Brightness is separate so the strobe can
+# stand out from the 1% flicker.
+LED_LOG_COLOR = 0xFFFF00      # yellow
+LED_LOG_BRIGHTNESS = 0.15
+LED_LOG_PERIOD_MS = 1200      # one double-flash cycle
+LED_LOG_FLASH_MS = 50         # each flash
+LED_LOG_GAP_MS = 100          # gap between the two flashes

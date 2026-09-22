@@ -9,6 +9,7 @@
 #               ui.py      - ILI9341 TFT over SPI (all rendering)
 #               touch.py   - TSC2007 touch over I2C (page navigation)
 #               datalog.py - microSD over shared SPI (CSV logging)
+#               statusled.py - onboard NeoPixel (CAN link / log strobe)
 #             config.py holds every tunable; ticks.py the timing helpers.
 #  Fits in:   This IS the top: CircuitPython auto-runs code.py at power-up.
 #
@@ -29,6 +30,7 @@ import config
 import ticks
 import canbus
 import datalog
+import statusled
 import touch
 import ui
 
@@ -49,6 +51,7 @@ except Exception:  # pylint: disable=broad-except
 #    no SD card = no logging) - both report and carry on.
 nav = touch.TouchNav()
 logger = datalog.DataLogger(board.SPI())
+led = statusled.StatusLed()   # NeoPixel CAN link/activity light
 
 # All long-lived objects now exist. Collect the startup garbage once so the
 # loop begins with a defragmented heap; steady-state allocation is near zero
@@ -70,6 +73,8 @@ while True:
     now = ticks.ms()          # one timestamp per pass - all subsystems agree
 
     can.update(ecu, now)      # drain every pending CAN frame (never blocks)
+    led.update(now, can.last_rx, can.bus_ok,   # link light + log strobe
+               logger.state == datalog.STATE_ON)
 
     delta = nav.update(now)   # 50 Hz touch poll; -1/0/+1 page step
     if delta:

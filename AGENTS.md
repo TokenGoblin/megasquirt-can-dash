@@ -78,7 +78,7 @@ Copy **only** these from the bundle's `lib/` into `CIRCUITPY/lib/`:
   `ImportError: no module named 'adafruit_ticks'`.
 
 Then copy the repo's `*.py` files to the root of `CIRCUITPY`: `boot.py`,
-`canbus.py`, `config.py`, `datalog.py`, `ticks.py`, `touch.py`, `ui.py`, then
+`canbus.py`, `config.py`, `datalog.py`, `statusled.py`, `ticks.py`, `touch.py`, `ui.py`, then
 **`code.py` last**. Auto-reload restarts the board on every write, and copying
 `code.py` last keeps it from running against a half-copied tree.
 

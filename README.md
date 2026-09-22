@@ -43,6 +43,10 @@ real-world testing.
 - **Engine-gated CSV datalogging** to microSD, MegaLogViewer HD compatible
 - **Tap navigation** - left half = previous page, right half = next page
 - **Custom boot splash** from a BMP on the CIRCUITPY drive
+- **CAN activity light** - the Feather's onboard NeoPixel flickers green like an
+  Ethernet link light while frames arrive, breathes blue -> purple while the bus
+  is quiet, double-flashes yellow like an aircraft strobe while a datalog is
+  being written, and glows solid red on a bus error
 - Strictly **non-blocking** cooperative main loop; see [PERFORMANCE.md](PERFORMANCE.md)
 
 ## Hardware
@@ -112,7 +116,7 @@ silkscreen). A short bench pigtail will often work unterminated; a car harness w
 Copy these repo files to the **root** of the `CIRCUITPY` drive:
 
 ```
-code.py  config.py  canbus.py  ui.py  touch.py  datalog.py  ticks.py  boot.py
+code.py  config.py  canbus.py  ui.py  touch.py  datalog.py  statusled.py  ticks.py  boot.py
 ```
 
 CircuitPython auto-runs `code.py` on power-up. Optionally add a `splash.bmp`
@@ -201,6 +205,7 @@ canbus.py       canio setup w/ hardware ID filters, frame decode, EcuData store
 ui.py           displayio UI: pages, bars, markers, banners, render gating
 touch.py        TSC2007 polling + tap-zone state machine
 datalog.py      SD mount + engine-gated CSV session logger
+statusled.py    NeoPixel CAN link/activity light (Ethernet-style flicker)
 ticks.py        rollover-safe millisecond timing helpers
 boot.py         intentionally empty (see its comments for why)
 PERFORMANCE.md  architecture + optimization rationale
