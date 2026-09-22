@@ -100,6 +100,7 @@ silkscreen). A short bench pigtail will often work unterminated; a car harness w
    | `adafruit_tsc2007.mpy` | touch controller |
    | `adafruit_sdcard.mpy` | SD card datalogging |
    | `adafruit_bus_device/` (folder) | dependency of the above |
+   | `adafruit_ticks.mpy` | dependency of `adafruit_display_text` (current bundles) |
 
    Copy **only** these - the M4's ~2 MB internal flash is shared with your code,
    and dumping the whole bundle in will fill it. (`canio`, `displayio`,
