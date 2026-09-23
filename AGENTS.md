@@ -132,9 +132,59 @@ print('CAN frames:',n,'ids:',sorted(ids),'state:',can.state,'tec/rec:',can.trans
 
 Send `[char]4` afterwards to put the board back into `code.py`.
 
+### Status LED
+
+The onboard NeoPixel (`statusled.py`, settings in `config.py`'s STATUS LED
+section) is the quickest health check the human can give you:
+
+| LED | State |
+|---|---|
+| Green flicker (1%) | dash frames arriving |
+| Blue → purple breathing (0-5%, 4 s) | bus healthy, no frames for 150 ms |
+| Yellow double flash (15%, 1.2 s cycle) over the flicker | datalog session writing to SD |
+| Solid red (1%) | CAN error-passive / bus-off (overrides all) |
+
+**On the bench with nothing on the CAN pads, a healthy unit breathes blue →
+purple.** The dash never transmits, so an unconnected bus stays `ERROR_ACTIVE`
+rather than going red.
+
+To exercise every state without an ECU, run this in the REPL (paste mode as
+above). It sends MegaSquirt frames in CAN **loopback** through the real
+`CanBus` class and simulates the logging flag. `canio` is a built-in module
+whose attributes can't be reassigned, so the snippet swaps in a small wrapper
+object instead:
+
+```python
+import canio,canbus,statusled,ticks,config
+class _Shim:
+    Match=canio.Match; BusState=canio.BusState
+    @staticmethod
+    def CAN(**k): return canio.CAN(loopback=True,silent=True,**k)
+canbus.canio=_Shim
+bus=canbus.CanBus(); ecu=canbus.EcuData(); led=statusled.StatusLed()
+frame=canio.Message(id=config.BASE_CAN_ID,data=bytes([3,72,0,0,2,188,0,0]))
+def run(secs,send,ok=True,log=False):
+    t=ticks.ms(); nxt=t
+    while ticks.diff(ticks.ms(),t)<secs*1000:
+        now=ticks.ms()
+        if send and ticks.diff(now,nxt)>=0:
+            bus._can.send(frame); nxt=now+20
+        bus.update(ecu,now); led.update(now,bus.last_rx,ok,log)
+print('LOG+TRAFFIC'); run(8,True,log=True)
+print('TRAFFIC'); run(5,True)
+print('IDLE'); run(6,False)
+print('BUS ERROR'); run(3,False,ok=False)
+print('map_x10:',ecu.value_x10[config.PARAM_MAP])   # 840 = frame decoded
+```
+
+Tell the human to watch the LED **before** you send it; it runs for about 22 s.
+To try a different brightness without editing files, set
+`config.LED_BRIGHTNESS=...` (or `LED_LOG_BRIGHTNESS` etc.) before
+constructing `StatusLed()`. The lowest level that still lights is ~0.004.
+
 ## 6. What an agent cannot verify
 
-You can't see the screen. Ask the human to confirm that the gauges render and
-that touch paging works; if taps are mirrored, swap `TS_RAW_X_MIN` and
-`TS_RAW_X_MAX` in `config.py`. Live-data testing needs the Feather wired to a
+You can't see the screen or the LED. Ask the human to confirm that the gauges
+render, that touch paging works, and that the LED breathes on the bench; if
+taps are mirrored, swap `TS_RAW_X_MIN` and `TS_RAW_X_MAX` in `config.py`. Live-data testing needs the Feather wired to a
 running ECU (CANH/CANL, 120 Ω termination at each end of the bus).

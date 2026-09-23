@@ -30,6 +30,12 @@ one shared `ticks.ms()` stamp per pass) whether its own deadline has arrived:
                                       └── change_page ─┘
 ```
 
+- **Status LED** (`statusled.py`) rides along right after the CAN drain,
+  gated to a 10 ms tick. It reads only `can.last_rx`, `can.bus_ok` and the
+  logger state; every pattern (flicker, breathe, strobe) is a pure function
+  of the tick stamp, the math is integer-only, and the NeoPixel is written
+  (~30 us) only when the color actually changes - measured 0 bytes allocated
+  per second with the strobe running.
 - **No `time.sleep()` anywhere in the loop path.** The loop spins at several
   hundred Hz; subsystems gate themselves.
 - **All scheduling uses `supervisor.ticks_ms()` deltas** (`ticks.py`), never

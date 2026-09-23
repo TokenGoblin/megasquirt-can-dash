@@ -43,7 +43,7 @@ real-world testing.
 - **Engine-gated CSV datalogging** to microSD, MegaLogViewer HD compatible
 - **Tap navigation** - left half = previous page, right half = next page
 - **Custom boot splash** from a BMP on the CIRCUITPY drive
-- **CAN activity light** - the Feather's onboard NeoPixel flickers green like an
+- **Status LED** - the Feather's onboard NeoPixel flickers green like an
   Ethernet link light while frames arrive, breathes blue -> purple while the bus
   is quiet, double-flashes yellow like an aircraft strobe while a datalog is
   being written, and glows solid red on a bus error
@@ -141,6 +141,19 @@ CircuitPython auto-runs `code.py` on power-up. Optionally add a `splash.bmp`
   in `/sd/logs/log001.csv`, `log002.csv`, ... - plain CSV with a name row and a
   units row, which **MegaLogViewer HD** opens directly (deliberately not the
   proprietary binary `.mlg` format, which can't be safely written blind).
+- **Status LED:** the Feather's onboard RGB NeoPixel
+  shows bus and logging health at a glance, even with the screen on another page:
+
+  | LED | Meaning |
+  |---|---|
+  | Fast **green flicker** (1%) | Dash frames arriving - like an Ethernet port's link/activity light |
+  | Slow **blue → purple breathing** (0-5%, 4 s per breath) | Bus healthy but quiet: no dash frames for 150 ms (ECU off, CAN unplugged, broadcast disabled) |
+  | **Yellow double flash** (15%, every 1.2 s), laid over the flicker | A datalog session is open and rows are being written to the SD card |
+  | **Solid red** (1%) | CAN controller is error-passive or bus-off - wiring, termination, or baud problem. Overrides everything else |
+
+  Normal sequence in the car: breathing at key-on, green flicker once the ECU
+  starts broadcasting, yellow strobes added when the engine starts and a log
+  session opens, back to breathing after the ECU powers down.
 
 ## Configuration
 
@@ -161,6 +174,11 @@ valid range, and where to find the right value for your setup. Highlights:
   taps are reversed)
 - `DISPLAY_ROTATION` - `90` (default) or `270` if your screen is upside-down
 - `ENGINE_RUNNING_RPM`, `LOG_INTERVAL_MS` - datalog gating and rate
+- `LED_*` - status LED: `LED_ENABLED` master switch; `LED_BRIGHTNESS` (flicker
+  and error), `LED_IDLE_MAX_BRIGHTNESS` (breathing peak) and
+  `LED_LOG_BRIGHTNESS` (strobe) as 0.0-1.0 - the pixel is very bright, and
+  the lowest level that still lights is ~0.004; colors and all timings
+  (`LED_BLINK_MS`, `LED_IDLE_BREATHE_MS`, `LED_LOG_PERIOD_MS`, ...)
 - `DEBUG` - print loop rate / worst loop time / free memory over USB serial
 
 ## Custom splash screen
@@ -194,6 +212,9 @@ $dest.Save("splash.bmp", [System.Drawing.Imaging.ImageFormat]::Bmp)
 | `NO SD` with a card inserted | Card not FAT32; card not fully clicked in; some very large (>32 GB) cards ship exFAT - reformat FAT32 |
 | `ValueError: incompatible .mpy file` on boot | Library bundle doesn't match your CircuitPython major version - use the 10.x bundle with CircuitPython 10 |
 | Boost slightly off after the dash rebooted while driving | The baro reference couldn't self-capture (it needs to see RPM = 0) so it's running on the sea-level fallback; it locks correctly the next time the engine is off. Pin `ATMOSPHERIC_KPA_OVERRIDE` if your install power-cycles the dash mid-drive routinely |
+| Status LED solid red | CAN controller gave up on the bus (error-passive / bus-off): CANH/CANL swapped or open, missing termination, or baud mismatch. `auto_restart` recovers it by itself once the fault clears |
+| Status LED keeps breathing with the ECU on | No matching dash frames are arriving: broadcast not enabled, `BASE_CAN_ID` mismatch, or a CAN wire open/disconnected (the dash only listens, so an open wire can look like a quiet bus rather than an error) |
+| Status LED never lights | `LED_ENABLED = False`, or a brightness set below ~0.004 (rounds to off) |
 | Values freeze but no `NO CAN` | Shouldn't happen (stale timeout is per-channel) - check the serial console for tracebacks and please open an issue |
 
 ## Repo structure
@@ -205,7 +226,7 @@ canbus.py       canio setup w/ hardware ID filters, frame decode, EcuData store
 ui.py           displayio UI: pages, bars, markers, banners, render gating
 touch.py        TSC2007 polling + tap-zone state machine
 datalog.py      SD mount + engine-gated CSV session logger
-statusled.py    NeoPixel CAN link/activity light (Ethernet-style flicker)
+statusled.py    NeoPixel status LED: CAN activity, idle breathe, log strobe, bus error
 ticks.py        rollover-safe millisecond timing helpers
 boot.py         intentionally empty (see its comments for why)
 PERFORMANCE.md  architecture + optimization rationale
